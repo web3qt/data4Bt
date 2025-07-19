@@ -99,6 +99,9 @@ type Downloader interface {
 	// GetSymbols 获取所有可用的交易对
 	GetSymbols(ctx context.Context) ([]string, error)
 	
+	// GetAvailableDates 获取指定代币的所有可用月份数据
+	GetAvailableDates(ctx context.Context, symbol string) ([]time.Time, error)
+	
 	// ValidateURL 验证下载URL是否有效
 	ValidateURL(ctx context.Context, url string) error
 }

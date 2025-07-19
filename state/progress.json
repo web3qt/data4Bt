@@ -1,362 +1,82 @@
 {
-  "AAVEUSDT": {
-    "symbol": "AAVEUSDT",
-    "last_date": "2025-07-14T15:36:36.443092+08:00",
-    "total_files": 0,
-    "processed": 3,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:49:42.380728+08:00"
-  },
   "ADAUSDT": {
     "symbol": "ADAUSDT",
-    "last_date": "2025-07-14T15:36:36.41238+08:00",
+    "last_date": "2024-12-19T08:20:28.842026Z",
     "total_files": 0,
-    "processed": 3,
+    "processed": 6,
     "failed": 0,
-    "last_updated": "2025-07-19T15:49:43.143597+08:00"
-  },
-  "ALGOUSDT": {
-    "symbol": "ALGOUSDT",
-    "last_date": "2025-07-14T15:36:36.449043+08:00",
-    "total_files": 0,
-    "processed": 3,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:49:41.876845+08:00"
-  },
-  "ATOMUSDT": {
-    "symbol": "ATOMUSDT",
-    "last_date": "2025-07-14T15:36:36.434925+08:00",
-    "total_files": 0,
-    "processed": 3,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:49:42.37667+08:00"
+    "last_updated": "2025-07-19T16:22:27.617067+08:00"
   },
   "AVAXUSDT": {
     "symbol": "AVAXUSDT",
-    "last_date": "2025-07-14T15:36:36.422757+08:00",
+    "last_date": "2024-12-19T08:20:59.550059Z",
     "total_files": 0,
-    "processed": 3,
+    "processed": 6,
     "failed": 0,
-    "last_updated": "2025-07-19T15:49:42.379749+08:00"
-  },
-  "BANDUSDT": {
-    "symbol": "BANDUSDT",
-    "last_date": "2025-07-13T15:38:07.658845+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:17.806131+08:00"
-  },
-  "BATUSDT": {
-    "symbol": "BATUSDT",
-    "last_date": "2025-07-13T15:38:07.640064+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:18.595767+08:00"
-  },
-  "BCHUSDT": {
-    "symbol": "BCHUSDT",
-    "last_date": "2025-07-14T15:36:36.429169+08:00",
-    "total_files": 0,
-    "processed": 3,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:49:42.378872+08:00"
+    "last_updated": "2025-07-19T16:22:34.599443+08:00"
   },
   "BNBUSDT": {
     "symbol": "BNBUSDT",
-    "last_date": "2025-07-14T15:36:36.409914+08:00",
+    "last_date": "2024-12-19T08:20:22.607928Z",
     "total_files": 0,
-    "processed": 3,
+    "processed": 6,
     "failed": 0,
-    "last_updated": "2025-07-19T15:49:43.141927+08:00"
+    "last_updated": "2025-07-19T16:22:26.233716+08:00"
   },
   "BTCUSDT": {
     "symbol": "BTCUSDT",
-    "last_date": "2025-07-14T15:36:36.404328+08:00",
+    "last_date": "2024-12-19T08:20:10.610385Z",
     "total_files": 0,
-    "processed": 3,
+    "processed": 6,
     "failed": 0,
-    "last_updated": "2025-07-19T15:49:43.143004+08:00"
-  },
-  "CHZUSDT": {
-    "symbol": "CHZUSDT",
-    "last_date": "2025-07-13T15:36:36.47668+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:18.597711+08:00"
-  },
-  "COMPUSDT": {
-    "symbol": "COMPUSDT",
-    "last_date": "2025-07-13T15:38:07.645715+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:17.634273+08:00"
-  },
-  "CRVUSDT": {
-    "symbol": "CRVUSDT",
-    "last_date": "2025-07-13T15:38:07.637833+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:18.600403+08:00"
+    "last_updated": "2025-07-19T16:22:23.171476+08:00"
   },
   "DOGEUSDT": {
     "symbol": "DOGEUSDT",
-    "last_date": "2025-07-14T15:36:36.420706+08:00",
+    "last_date": "2024-12-19T08:20:53.274561Z",
     "total_files": 0,
-    "processed": 3,
+    "processed": 6,
     "failed": 0,
-    "last_updated": "2025-07-19T15:49:42.38204+08:00"
+    "last_updated": "2025-07-19T16:22:33.213473+08:00"
   },
   "DOTUSDT": {
     "symbol": "DOTUSDT",
-    "last_date": "2025-07-14T15:36:36.419109+08:00",
+    "last_date": "2024-12-19T08:20:47.172117Z",
     "total_files": 0,
-    "processed": 3,
+    "processed": 6,
     "failed": 0,
-    "last_updated": "2025-07-19T15:49:43.839794+08:00"
-  },
-  "EGLDUSDT": {
-    "symbol": "EGLDUSDT",
-    "last_date": "2025-07-13T15:36:36.46723+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:18.573752+08:00"
-  },
-  "ENJUSDT": {
-    "symbol": "ENJUSDT",
-    "last_date": "2025-07-13T15:38:07.642016+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:19.002796+08:00"
-  },
-  "ETCUSDT": {
-    "symbol": "ETCUSDT",
-    "last_date": "2025-07-13T15:36:36.436682+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:17.820221+08:00"
+    "last_updated": "2025-07-19T16:22:31.808411+08:00"
   },
   "ETHUSDT": {
     "symbol": "ETHUSDT",
-    "last_date": "2025-07-14T15:36:36.40781+08:00",
+    "last_date": "2024-12-19T08:20:16.604616Z",
     "total_files": 0,
-    "processed": 3,
+    "processed": 6,
     "failed": 0,
-    "last_updated": "2025-07-19T15:49:43.144+08:00"
-  },
-  "FETUSDT": {
-    "symbol": "FETUSDT",
-    "last_date": "2025-07-13T15:38:07.657299+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:18.598842+08:00"
-  },
-  "FILUSDT": {
-    "symbol": "FILUSDT",
-    "last_date": "2025-07-14T15:36:36.438033+08:00",
-    "total_files": 0,
-    "processed": 3,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:49:43.276411+08:00"
-  },
-  "FLOWUSDT": {
-    "symbol": "FLOWUSDT",
-    "last_date": "2025-07-13T15:36:36.473785+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:18.595055+08:00"
-  },
-  "HBARUSDT": {
-    "symbol": "HBARUSDT",
-    "last_date": "2025-07-13T15:36:36.464834+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:18.599278+08:00"
-  },
-  "ICPUSDT": {
-    "symbol": "ICPUSDT",
-    "last_date": "2025-07-14T15:36:36.456262+08:00",
-    "total_files": 0,
-    "processed": 3,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:49:42.552088+08:00"
-  },
-  "LINKUSDT": {
-    "symbol": "LINKUSDT",
-    "last_date": "2025-07-14T15:36:36.427543+08:00",
-    "total_files": 0,
-    "processed": 3,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:49:41.73173+08:00"
+    "last_updated": "2025-07-19T16:22:24.574818+08:00"
   },
   "LTCUSDT": {
     "symbol": "LTCUSDT",
-    "last_date": "2025-07-14T15:36:36.425641+08:00",
+    "last_date": "2024-12-19T08:21:05.687647Z",
     "total_files": 0,
-    "processed": 3,
+    "processed": 6,
     "failed": 0,
-    "last_updated": "2025-07-19T15:49:42.020031+08:00"
-  },
-  "MANAUSDT": {
-    "symbol": "MANAUSDT",
-    "last_date": "2025-07-13T15:38:07.633968+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:18.598298+08:00"
-  },
-  "MKRUSDT": {
-    "symbol": "MKRUSDT",
-    "last_date": "2025-07-14T15:36:36.444584+08:00",
-    "total_files": 0,
-    "processed": 3,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:49:41.876222+08:00"
-  },
-  "NEARUSDT": {
-    "symbol": "NEARUSDT",
-    "last_date": "2025-07-13T15:36:36.469984+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:17.620076+08:00"
-  },
-  "NMRUSDT": {
-    "symbol": "NMRUSDT",
-    "last_date": "2025-07-13T15:38:07.660585+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:17.829339+08:00"
-  },
-  "ONTUSDT": {
-    "symbol": "ONTUSDT",
-    "last_date": "2025-07-13T15:38:07.650143+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:18.593516+08:00"
-  },
-  "QTUMUSDT": {
-    "symbol": "QTUMUSDT",
-    "last_date": "2025-07-13T15:38:07.652403+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:17.619086+08:00"
-  },
-  "SANDUSDT": {
-    "symbol": "SANDUSDT",
-    "last_date": "2025-07-13T15:38:07.635979+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:18.596751+08:00"
-  },
-  "SHIBUSDT": {
-    "symbol": "SHIBUSDT",
-    "last_date": "2025-07-14T15:36:36.424199+08:00",
-    "total_files": 0,
-    "processed": 3,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:49:42.380227+08:00"
+    "last_updated": "2025-07-19T16:22:35.970765+08:00"
   },
   "SOLUSDT": {
     "symbol": "SOLUSDT",
-    "last_date": "2025-07-14T15:36:36.417072+08:00",
+    "last_date": "2024-12-19T08:20:40.89775Z",
     "total_files": 0,
-    "processed": 3,
+    "processed": 6,
     "failed": 0,
-    "last_updated": "2025-07-19T15:49:43.840453+08:00"
-  },
-  "THETAUSDT": {
-    "symbol": "THETAUSDT",
-    "last_date": "2025-07-14T15:36:36.445992+08:00",
-    "total_files": 0,
-    "processed": 3,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:49:42.018028+08:00"
-  },
-  "TRXUSDT": {
-    "symbol": "TRXUSDT",
-    "last_date": "2025-07-14T15:36:36.439703+08:00",
-    "total_files": 0,
-    "processed": 3,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:49:42.381231+08:00"
-  },
-  "UNIUSDT": {
-    "symbol": "UNIUSDT",
-    "last_date": "2025-07-14T15:36:36.433012+08:00",
-    "total_files": 0,
-    "processed": 3,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:49:41.732547+08:00"
-  },
-  "VETUSDT": {
-    "symbol": "VETUSDT",
-    "last_date": "2025-07-14T15:36:36.451017+08:00",
-    "total_files": 0,
-    "processed": 3,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:49:42.38164+08:00"
-  },
-  "XLMUSDT": {
-    "symbol": "XLMUSDT",
-    "last_date": "2025-07-14T15:36:36.430478+08:00",
-    "total_files": 0,
-    "processed": 3,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:49:41.980763+08:00"
+    "last_updated": "2025-07-19T16:22:30.434285+08:00"
   },
   "XRPUSDT": {
     "symbol": "XRPUSDT",
-    "last_date": "2025-07-14T15:36:36.414508+08:00",
+    "last_date": "2024-12-19T08:20:35.254138Z",
     "total_files": 0,
-    "processed": 3,
+    "processed": 6,
     "failed": 0,
-    "last_updated": "2025-07-19T15:49:43.277102+08:00"
-  },
-  "XTZUSDT": {
-    "symbol": "XTZUSDT",
-    "last_date": "2025-07-13T15:36:36.475206+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:18.594339+08:00"
-  },
-  "ZECUSDT": {
-    "symbol": "ZECUSDT",
-    "last_date": "2025-07-13T15:38:07.643925+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:17.799727+08:00"
-  },
-  "ZILUSDT": {
-    "symbol": "ZILUSDT",
-    "last_date": "2025-07-13T15:38:07.65413+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:18.600034+08:00"
-  },
-  "ZRXUSDT": {
-    "symbol": "ZRXUSDT",
-    "last_date": "2025-07-13T15:38:07.655683+08:00",
-    "total_files": 0,
-    "processed": 2,
-    "failed": 0,
-    "last_updated": "2025-07-19T15:43:18.599678+08:00"
+    "last_updated": "2025-07-19T16:22:29.044379+08:00"
   }
 }

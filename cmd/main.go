@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"binance-data-loader/internal/config"
+	"binance-data-loader/internal/domain"
 	"binance-data-loader/internal/logger"
 	"binance-data-loader/internal/state"
 	"binance-data-loader/pkg/binance"
@@ -23,11 +25,12 @@ import (
 
 var (
 	configFile = flag.String("config", "config.yml", "Configuration file path")
-	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views")
+	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, status")
 	symbols    = flag.String("symbols", "", "Comma-separated list of symbols to process (optional)")
 	endDate    = flag.String("end", "", "End date (YYYY-MM-DD)")
 	verbose    = flag.Bool("verbose", false, "Enable verbose logging")
 	version    = flag.Bool("version", false, "Show version information")
+	detailed   = flag.Bool("detailed", false, "Show detailed status information")
 )
 
 const (
@@ -101,6 +104,8 @@ func executeCommand(ctx context.Context, cfg *config.Config, cmd string) error {
 		return initializeDatabase(ctx, cfg)
 	case "create-views":
 		return createMaterializedViews(ctx, cfg)
+	case "status":
+		return showStatus(ctx, cfg)
 	default:
 		return fmt.Errorf("unknown command: %s", cmd)
 	}
@@ -347,6 +352,129 @@ func getSymbolList(ctx context.Context, downloader *binance.BinanceDownloader) (
 	return downloader.GetSymbols(ctx)
 }
 
+// showStatus 显示下载状态
+func showStatus(ctx context.Context, cfg *config.Config) error {
+	// 初始化状态管理器
+	stateManager, err := state.NewFileStateManager(cfg.State)
+	if err != nil {
+		return fmt.Errorf("failed to initialize state manager: %w", err)
+	}
+
+	// 获取所有状态
+	allStates, err := stateManager.GetAllStates()
+	if err != nil {
+		return fmt.Errorf("failed to get states: %w", err)
+	}
+
+	if len(allStates) == 0 {
+		fmt.Println("没有找到任何下载状态记录")
+		fmt.Println("提示：请先运行 'go run cmd/main.go -cmd=run' 开始下载数据")
+		return nil
+	}
+
+	// 过滤指定的symbols
+	if *symbols != "" {
+		requestedSymbols := strings.Split(*symbols, ",")
+		filteredStates := make(map[string]*domain.ProcessingState)
+		for _, symbol := range requestedSymbols {
+			symbol = strings.TrimSpace(strings.ToUpper(symbol))
+			if state, exists := allStates[symbol]; exists {
+				filteredStates[symbol] = state
+			} else {
+				fmt.Printf("警告: 未找到代币 %s 的状态记录\n", symbol)
+			}
+		}
+		allStates = filteredStates
+	}
+
+	// 不再需要获取总体进度报告，直接从状态计算
+
+	// 显示总体状态
+	fmt.Printf("\n=== Binance 数据下载状态 ===\n\n")
+	totalCompleted := 0
+	totalFailed := 0
+	for _, state := range allStates {
+		totalCompleted += state.Processed
+		totalFailed += state.Failed
+	}
+	fmt.Printf("已完成任务: %d\n", totalCompleted)
+	if totalFailed > 0 {
+		fmt.Printf("失败任务: %d\n", totalFailed)
+	}
+	fmt.Printf("代币数量: %d\n", len(allStates))
+	fmt.Println()
+
+	// 按符号排序
+	var symbolList []string
+	for symbol := range allStates {
+		symbolList = append(symbolList, symbol)
+	}
+	sort.Strings(symbolList)
+
+	// 显示详细状态
+	if *detailed {
+		fmt.Printf("%-12s %-12s %-8s %-8s %-20s %-10s\n", 
+			"代币", "最后日期", "已完成", "失败", "最后更新", "状态")
+		fmt.Println(strings.Repeat("-", 80))
+		
+		for _, symbol := range symbolList {
+			state := allStates[symbol]
+			
+			lastDateStr := "未开始"
+			if !state.LastDate.IsZero() {
+				lastDateStr = state.LastDate.Format("2006-01-02")
+			}
+			
+			lastUpdatedStr := state.LastUpdated.Format("2006-01-02 15:04")
+			
+			status := "进行中"
+			if state.Failed > 0 {
+				status = "有错误"
+			} else if state.Processed == 0 {
+				status = "等待中"
+			} else if state.Processed > 0 {
+				status = "已处理"
+			}
+			
+			fmt.Printf("%-12s %-12s %-8d %-8d %-20s %-10s\n", 
+				symbol, lastDateStr, state.Processed, 
+				state.Failed, lastUpdatedStr, status)
+		}
+	} else {
+		// 简化显示
+		fmt.Printf("%-12s %-12s %-8s %-8s\n", "代币", "最后日期", "已完成", "状态")
+		fmt.Println(strings.Repeat("-", 45))
+		
+		for _, symbol := range symbolList {
+			state := allStates[symbol]
+			
+			lastDateStr := "未开始"
+			if !state.LastDate.IsZero() {
+				lastDateStr = state.LastDate.Format("2006-01-02")
+			}
+			
+			status := "进行中"
+			if state.Failed > 0 {
+				status = "有错误"
+			} else if state.Processed == 0 {
+				status = "等待中"
+			} else if state.Processed > 0 {
+				status = "已处理"
+			}
+			
+			fmt.Printf("%-12s %-12s %-8d %-8s\n", 
+				symbol, lastDateStr, state.Processed, status)
+		}
+	}
+	
+	fmt.Printf("\n提示：\n")
+	fmt.Printf("- 使用 -detailed 参数查看详细信息\n")
+	fmt.Printf("- 使用 -symbols=BTCUSDT,ETHUSDT 查看特定代币状态\n")
+	fmt.Printf("- 数据存储位置: %s\n", cfg.State.FilePath)
+	
+	return nil
+}
+
 func init() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
@@ -356,10 +484,12 @@ func init() {
 		fmt.Fprintf(os.Stderr, "  validate   - Validate existing data\n")
 		fmt.Fprintf(os.Stderr, "  init-db    - Initialize database tables\n")
 		fmt.Fprintf(os.Stderr, "  create-views - Create materialized views\n")
+		fmt.Fprintf(os.Stderr, "  status     - Show download status\n")
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  %s -cmd=run -start=2024-01-01 -end=2024-01-31\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=status -detailed\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=validate -symbols=BTCUSDT,ETHUSDT\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=init-db\n", os.Args[0])
 	}

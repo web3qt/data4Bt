@@ -163,108 +163,91 @@ func (s *Scheduler) generateTasksWithEndDate(ctx context.Context, symbols []stri
 func (s *Scheduler) generateTasksForSymbolWithEndDate(ctx context.Context, symbol string, endDate time.Time) ([]domain.DownloadTask, error) {
 	var tasks []domain.DownloadTask
 
-	// 获取状态信息，确定起始日期
+	s.logger.Info().
+		Str("symbol", symbol).
+		Msg("Fetching available monthly data from Binance")
+
+	// 直接从Binance获取该代币的所有可用月份
+	availableMonths, err := s.downloader.GetAvailableDates(ctx, symbol)
+	if err != nil {
+		s.logger.Error().
+			Err(err).
+			Str("symbol", symbol).
+			Msg("Failed to fetch available months from Binance")
+		return nil, fmt.Errorf("failed to get available months for %s: %w", symbol, err)
+	}
+
+	if len(availableMonths) == 0 {
+		s.logger.Warn().
+			Str("symbol", symbol).
+			Msg("No monthly data available for symbol")
+		return tasks, nil
+	}
+
+	// 获取状态信息，确定哪些月份已经处理过
 	state, err := s.stateManager.GetState(symbol)
 	if err != nil {
 		s.logger.Debug().
 			Err(err).
 			Str("symbol", symbol).
-			Msg("No existing state found, will check database for last date")
+			Msg("No existing state found")
 		state = &domain.ProcessingState{
 			Symbol:   symbol,
-			LastDate: time.Time{}, // 零值表示需要从数据库查询
+			LastDate: time.Time{},
+		}
+	}
+
+	// 从数据库获取最后处理的日期
+	lastProcessedDate := state.LastDate
+	if lastProcessedDate.IsZero() {
+		dbLastDate, err := s.repository.GetLastDate(ctx, symbol)
+		if err == nil && !dbLastDate.IsZero() {
+			lastProcessedDate = dbLastDate
 		}
 	}
 
 	s.logger.Debug().
 		Str("symbol", symbol).
-		Str("state_last_date", state.LastDate.Format("2006-01-02")).
-		Bool("state_is_zero", state.LastDate.IsZero()).
-		Msg("Retrieved state")
+		Str("last_processed_date", lastProcessedDate.Format("2006-01-02")).
+		Int("available_months", len(availableMonths)).
+		Msg("Processing available months")
 
-	// 确定起始日期：如果状态中没有记录，从数据库获取最后日期
-	var startDate time.Time
-	if state.LastDate.IsZero() {
-		// 从数据库获取该代币的最后日期
-		lastDate, err := s.repository.GetLastDate(ctx, symbol)
-		s.logger.Debug().
-			Str("symbol", symbol).
-			Str("db_last_date", lastDate.Format("2006-01-02")).
-			Bool("db_last_date_is_zero", lastDate.IsZero()).
-			Msg("Retrieved last date from database")
-		if err != nil {
-			s.logger.Debug().
-				Err(err).
-				Str("symbol", symbol).
-				Msg("Failed to get last date from database, will start from earliest available")
-			// 如果数据库中没有数据，从最近7天开始
-			startDate = time.Now().AddDate(0, 0, -7)
-		} else if lastDate.IsZero() {
-			// 数据库中没有该代币的数据，从最近7天开始
-			startDate = time.Now().AddDate(0, 0, -7)
-			s.logger.Debug().
-				Str("symbol", symbol).
-				Str("calculated_start_date", startDate.Format("2006-01-02")).
-				Msg("Set start date to 7 days ago (no data in DB)")
-		} else {
-			// 从数据库中的最后日期的下一天开始
-			startDate = lastDate.AddDate(0, 0, 1)
-			s.logger.Debug().
-				Str("symbol", symbol).
-				Str("calculated_start_date", startDate.Format("2006-01-02")).
-				Msg("Set start date to day after last DB date")
+	// 过滤出需要处理的月份
+	for _, monthDate := range availableMonths {
+		// 跳过未来的月份
+		if monthDate.After(endDate) {
+			continue
 		}
-	} else {
-		// 从状态中的最后日期的下一天开始
-		startDate = state.LastDate.AddDate(0, 0, 1)
-		s.logger.Debug().
-			Str("symbol", symbol).
-			Str("calculated_start_date", startDate.Format("2006-01-02")).
-			Msg("Set start date to day after state date")
-	}
 
-	s.logger.Debug().
-		Str("symbol", symbol).
-		Str("start_date", startDate.Format("2006-01-02")).
-		Str("end_date", endDate.Format("2006-01-02")).
-		Msg("Date range determined")
-
-	// 生成日期范围内的任务
-	currentDate := startDate
-	for currentDate.Before(endDate) || currentDate.Equal(endDate) {
-		// 检查是否已经处理过
-		dateStr := currentDate.Format("2006-01-02")
-		// 如果当前日期小于等于最后处理日期，则跳过
-		if state.LastDate.IsZero() || currentDate.After(state.LastDate) {
-			// 检查数据是否可用
-			available, err := s.isDataAvailable(ctx, symbol, currentDate)
-			if err != nil {
+		// 如果已经处理过这个月份，跳过
+		if !lastProcessedDate.IsZero() {
+			lastProcessedMonth := time.Date(lastProcessedDate.Year(), lastProcessedDate.Month(), 1, 0, 0, 0, 0, time.UTC)
+			if monthDate.Before(lastProcessedMonth) || monthDate.Equal(lastProcessedMonth) {
 				s.logger.Debug().
-					Err(err).
 					Str("symbol", symbol).
-					Str("date", dateStr).
-					Msg("Failed to check data availability")
-			} else if available {
-				task := domain.DownloadTask{
-					Symbol: symbol,
-					Date:   currentDate,
-				}
-				s.logger.Debug().
-					Str("symbol", task.Symbol).
-					Str("date", task.Date.Format("2006-01-02")).
-					Msg("Generated task")
-				tasks = append(tasks, task)
+					Str("month", monthDate.Format("2006-01")).
+					Msg("Skipping already processed month")
+				continue
 			}
 		}
 
-		currentDate = currentDate.AddDate(0, 0, 1)
+		task := domain.DownloadTask{
+			Symbol: symbol,
+			Date:   monthDate,
+		}
+		tasks = append(tasks, task)
+
+		s.logger.Debug().
+			Str("symbol", symbol).
+			Str("month", monthDate.Format("2006-01")).
+			Msg("Added monthly task")
 	}
 
-	s.logger.Debug().
+	s.logger.Info().
 		Str("symbol", symbol).
-		Int("task_count", len(tasks)).
-		Str("start_date", startDate.Format("2006-01-02")).
-		Msg("Generated tasks for symbol")
+		Int("total_available", len(availableMonths)).
+		Int("tasks_generated", len(tasks)).
+		Msg("Generated monthly tasks based on Binance availability")
 
 	return tasks, nil
 }

@@ -197,7 +197,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("database.clickhouse.conn_max_lifetime", "10m")
 	
 	// 导入器默认配置
-	v.SetDefault("importer.batch_size", 10000)
+	v.SetDefault("importer.batch_size", 2)
 	v.SetDefault("importer.buffer_size", 20)
 	v.SetDefault("importer.flush_interval", "30s")
 	v.SetDefault("importer.enable_deduplication", true)

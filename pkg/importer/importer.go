@@ -52,11 +52,11 @@ func NewImporter(
 	}
 }
 
-// ImportData 导入数据
+// ImportData 导入数据 - 顺序处理，确保任务成功后才继续下一个
 func (i *Importer) ImportData(ctx context.Context, tasks []domain.DownloadTask) error {
 	i.logger.Info().
 		Int("task_count", len(tasks)).
-		Msg("Starting data import")
+		Msg("Starting data import (sequential processing)")
 
 	start := time.Now()
 	defer func() {
@@ -65,41 +65,44 @@ func (i *Importer) ImportData(ctx context.Context, tasks []domain.DownloadTask) 
 		})
 	}()
 
-	// 创建工作池
-	workerCount := i.config.BatchSize
-	if workerCount > len(tasks) {
-		workerCount = len(tasks)
-	}
-
-	taskChan := make(chan domain.DownloadTask, len(tasks))
-	errorChan := make(chan error, len(tasks))
-	var wg sync.WaitGroup
-
-	// 启动工作协程
-	for w := 0; w < workerCount; w++ {
-		wg.Add(1)
-		go i.worker(ctx, taskChan, errorChan, &wg)
-	}
-
 	// 启动缓冲区刷新协程
 	flushCtx, flushCancel := context.WithCancel(ctx)
 	defer flushCancel()
 	go i.bufferFlusher(flushCtx)
 
-	// 发送任务
-	for _, task := range tasks {
+	// 顺序处理任务，确保每个任务成功后才继续下一个
+	successCount := 0
+	for idx, task := range tasks {
 		select {
-		case taskChan <- task:
 		case <-ctx.Done():
-			close(taskChan)
 			return ctx.Err()
+		default:
 		}
-	}
-	close(taskChan)
 
-	// 等待所有工作完成
-	wg.Wait()
-	close(errorChan)
+		i.logger.Info().
+			Int("current", idx+1).
+			Int("total", len(tasks)).
+			Str("symbol", task.Symbol).
+			Str("month", task.Date.Format("2006-01")).
+			Msg("Processing monthly task")
+
+		if err := i.processTask(ctx, task); err != nil {
+			i.logger.Error().
+				Err(err).
+				Str("symbol", task.Symbol).
+				Str("month", task.Date.Format("2006-01")).
+				Msg("Failed to process monthly task, stopping import")
+			return fmt.Errorf("failed to process task for %s %s: %w", task.Symbol, task.Date.Format("2006-01"), err)
+		}
+
+		successCount++
+		i.logger.Info().
+			Int("completed", successCount).
+			Int("total", len(tasks)).
+			Str("symbol", task.Symbol).
+			Str("month", task.Date.Format("2006-01")).
+			Msg("Monthly task completed successfully")
+	}
 
 	// 最终刷新缓冲区
 	if err := i.flushBuffer(ctx); err != nil {
@@ -107,24 +110,11 @@ func (i *Importer) ImportData(ctx context.Context, tasks []domain.DownloadTask) 
 		return err
 	}
 
-	// 检查错误
-	var errors []error
-	for err := range errorChan {
-		if err != nil {
-			errors = append(errors, err)
-		}
-	}
-
-	if len(errors) > 0 {
-		i.logger.Error().
-			Int("error_count", len(errors)).
-			Msg("Import completed with errors")
-		return fmt.Errorf("import failed with %d errors: %v", len(errors), errors[0])
-	}
-
 	i.logger.Info().
+		Int("completed_tasks", successCount).
+		Int("total_tasks", len(tasks)).
 		Dur("duration", time.Since(start)).
-		Msg("Data import completed successfully")
+		Msg("Monthly data import completed successfully")
 
 	return nil
 }

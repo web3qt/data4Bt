@@ -107,20 +107,52 @@ func (d *BinanceDownloader) GetSymbols(ctx context.Context) ([]string, error) {
 		logger.LogPerformance("binance_downloader", "get_symbols", time.Since(start))
 	}()
 	
-	d.logger.Info().Msg("Using predefined symbols list")
+	d.logger.Info().Msg("Fetching USDT symbols from Binance monthly data directory")
 	
-	// 使用预定义的主要交易对列表，避免网页抓取问题
-	allSymbols := []string{
-		"BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT", "XRPUSDT",
-		"SOLUSDT", "DOTUSDT", "DOGEUSDT", "AVAXUSDT", "SHIBUSDT",
-		"LTCUSDT", "LINKUSDT", "BCHUSDT", "XLMUSDT", "UNIUSDT",
-		"ATOMUSDT", "ETCUSDT", "FILUSDT", "TRXUSDT", "EOSUSDT",
-		"AAVEUSDT", "MKRUSDT", "THETAUSDT", "XMRUSDT", "ALGOUSDT",
-		"VETUSDT", "ICPUSDT", "FTMUSDT", "HBARUSDT", "EGLDUSDT",
-		"NEARUSDT", "KLAYUSDT", "FLOWUSDT", "XTZUSDT", "CHZUSDT",
-		"MANAUSDT", "SANDUSDT", "CRVUSDT", "BATUSDT", "ENJUSDT",
-		"ZECUSDT", "COMPUSDT", "OMGUSDT", "ONTUSDT", "QTUMUSDT",
-		"ZILUSDT", "ZRXUSDT", "FETUSDT", "BANDUSDT", "NMRUSDT",
+	// 从Binance月度数据目录获取USDT结尾的代币列表
+	// 使用正确的Binance数据目录URL格式
+	url := fmt.Sprintf("%s/?prefix=data/spot/monthly/klines/", d.baseURL)
+	
+	d.logger.Debug().
+		Str("url", url).
+		Msg("Requesting symbols from Binance")
+	
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	
+	req.Header.Set("User-Agent", d.userAgent)
+	
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch symbols page: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		d.logger.Error().
+			Int("status_code", resp.StatusCode).
+			Str("url", url).
+			Msg("Failed to fetch symbols page")
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+	
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+	
+	// 从HTML中提取USDT结尾的交易对
+	allSymbols := d.extractUSDTSymbolsFromHTML(string(body))
+	
+	if len(allSymbols) == 0 {
+		d.logger.Warn().Msg("No USDT symbols found, using fallback list")
+		// 如果无法获取，使用备用列表
+		allSymbols = []string{
+			"BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT", "XRPUSDT",
+			"SOLUSDT", "DOTUSDT", "DOGEUSDT", "AVAXUSDT", "LTCUSDT",
+		}
 	}
 	
 	// 过滤交易对
@@ -130,7 +162,7 @@ func (d *BinanceDownloader) GetSymbols(ctx context.Context) ([]string, error) {
 		Int("total_symbols", len(allSymbols)).
 		Int("filtered_symbols", len(filteredSymbols)).
 		Str("filter", d.filter).
-		Msg("Symbols fetched and filtered")
+		Msg("USDT symbols fetched and filtered")
 	
 	return filteredSymbols, nil
 }
@@ -241,6 +273,30 @@ func (d *BinanceDownloader) extractSymbolsFromHTML(html string) []string {
 	return symbols
 }
 
+// extractUSDTSymbolsFromHTML 从HTML中提取USDT结尾的交易对
+func (d *BinanceDownloader) extractUSDTSymbolsFromHTML(html string) []string {
+	// 使用正则表达式匹配目录链接，只提取USDT结尾的
+	pattern := `<a[^>]*href="([^"]*/)"[^>]*>([^<]+USDT)/</a>`
+	re := regexp.MustCompile(pattern)
+	matches := re.FindAllStringSubmatch(html, -1)
+	
+	var symbols []string
+	for _, match := range matches {
+		if len(match) >= 3 {
+			symbol := strings.TrimSuffix(match[2], "/")
+			if symbol != "" && strings.HasSuffix(symbol, "USDT") {
+				symbols = append(symbols, symbol)
+			}
+		}
+	}
+	
+	d.logger.Debug().
+		Int("usdt_symbols_found", len(symbols)).
+		Msg("Extracted USDT symbols from HTML")
+	
+	return symbols
+}
+
 // filterSymbols 过滤交易对
 func (d *BinanceDownloader) filterSymbols(symbols []string) []string {
 	if d.filter == "" {
@@ -259,54 +315,72 @@ func (d *BinanceDownloader) filterSymbols(symbols []string) []string {
 
 // BuildDownloadURL 构建下载URL
 func (d *BinanceDownloader) BuildDownloadURL(symbol string, date time.Time) string {
-	dateStr := date.Format("2006-01-02")
+	// 按月构建URL: SYMBOL-1m-YYYY-MM.zip
+	dateStr := date.Format("2006-01")
 	filename := fmt.Sprintf("%s-%s-%s.zip", symbol, d.interval, dateStr)
-	return fmt.Sprintf("%s%s/%s/%s/%s", d.baseURL, d.dataPath, symbol, d.interval, filename)
+	return fmt.Sprintf("%s/data/spot/monthly/klines/%s/%s/%s", d.baseURL, symbol, d.interval, filename)
 }
 
-// GetAvailableDates 获取指定交易对的可用日期
+// GetAvailableDates 获取指定交易对的可用月份
 func (d *BinanceDownloader) GetAvailableDates(ctx context.Context, symbol string) ([]time.Time, error) {
-	url := fmt.Sprintf("%s%s/%s/", d.baseURL, d.dataPath, symbol)
+	d.logger.Debug().
+		Str("symbol", symbol).
+		Msg("Checking available months for symbol by testing URLs")
 	
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+	var availableDates []time.Time
+	
+	// 生成从最近12个月到当前月份的所有月份（为了快速测试）
+	now := time.Now().UTC()
+	startDate := now.AddDate(-1, 0, 0) // 12个月前
+	endDate := now
+	
+	// 遍历每个月份，检查数据是否可用
+	for current := startDate; current.Before(endDate) || current.Equal(endDate); current = current.AddDate(0, 1, 0) {
+		// 构建下载URL
+		downloadURL := d.BuildDownloadURL(symbol, current)
+		
+		// 验证URL是否可访问
+		if err := d.ValidateURL(ctx, downloadURL); err == nil {
+			availableDates = append(availableDates, current)
+			d.logger.Debug().
+				Str("symbol", symbol).
+				Str("month", current.Format("2006-01")).
+				Str("url", downloadURL).
+				Msg("Found available monthly data")
+		} else {
+			d.logger.Debug().
+				Str("symbol", symbol).
+				Str("month", current.Format("2006-01")).
+				Str("url", downloadURL).
+				Err(err).
+				Msg("Monthly data not available")
+		}
+		
+		// 如果是当前月份，停止检查
+		if current.Year() == endDate.Year() && current.Month() == endDate.Month() {
+			break
+		}
 	}
 	
-	req.Header.Set("User-Agent", d.userAgent)
+	d.logger.Info().
+		Str("symbol", symbol).
+		Int("available_months", len(availableDates)).
+		Msg("Found available monthly data")
 	
-	resp, err := d.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-	
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-	
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-	
-	// 解析HTML页面，提取日期
-	dates := d.extractDatesFromHTML(string(body), symbol)
-	
-	return dates, nil
+	return availableDates, nil
 }
 
-// extractDatesFromHTML 从HTML页面提取日期
+// extractDatesFromHTML 从HTML页面提取月份
 func (d *BinanceDownloader) extractDatesFromHTML(html, symbol string) []time.Time {
-	// 匹配文件名格式: SYMBOL-1m-YYYY-MM-DD.zip
-	pattern := fmt.Sprintf(`%s-%s-(\d{4}-\d{2}-\d{2})\.zip`, symbol, d.interval)
+	// 匹配文件名格式: SYMBOL-1m-YYYY-MM.zip
+	pattern := fmt.Sprintf(`%s-%s-(\d{4}-\d{2})\.zip`, symbol, d.interval)
 	re := regexp.MustCompile(pattern)
 	matches := re.FindAllStringSubmatch(html, -1)
 	
 	var dates []time.Time
 	for _, match := range matches {
 		if len(match) > 1 {
-			if date, err := time.Parse("2006-01-02", match[1]); err == nil {
+			if date, err := time.Parse("2006-01", match[1]); err == nil {
 				dates = append(dates, date)
 			}
 		}
