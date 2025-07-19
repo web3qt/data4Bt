@@ -272,7 +272,7 @@ func (d *BinanceDownloader) filterSymbols(symbols []string) []string {
 func (d *BinanceDownloader) BuildDownloadURL(symbol string, date time.Time) string {
 	dateStr := date.Format("2006-01-02")
 	filename := fmt.Sprintf("%s-%s-%s.zip", symbol, d.interval, dateStr)
-	return fmt.Sprintf("%s%s/%s/%s", d.baseURL, d.dataPath, symbol, filename)
+	return fmt.Sprintf("%s%s/%s/%s/%s", d.baseURL, d.dataPath, symbol, d.interval, filename)
 }
 
 // GetAvailableDates 获取指定交易对的可用日期

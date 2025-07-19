@@ -1,0 +1,45 @@
+# 测试环境配置
+logging:
+  level: "info"
+  format: "json"
+  output: "console"
+
+binance:
+  base_url: "https://data.binance.vision/"
+  data_path: "data/spot/daily/klines"
+  interval: "1m"
+  user_agent: "Mozilla/5.0 (compatible; data4bt-test/1.0)"
+  timeout: 30
+  retries: 3
+
+downloader:
+  max_concurrent: 1
+  retry_delay: 5
+  max_file_size: 104857600  # 100MB
+
+parser:
+  skip_header: false
+  date_format: "2006-01-02"
+  validate_data: true
+  max_file_size: 104857600  # 100MB
+
+database:
+  clickhouse:
+    host: "localhost"
+    port: 9000
+    database: "crypto"
+    username: "default"
+    password: ""
+    max_open_conns: 10
+    max_idle_conns: 5
+    conn_max_lifetime: 300
+
+scheduler:
+  end_date: ""  # 使用昨天
+  batch_days: 1
+  max_concurrent_symbols: 1
+
+state:
+  file_path: "./test_state.json"
+  backup_interval: 300
+  auto_save: true
