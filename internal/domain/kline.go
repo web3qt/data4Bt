@@ -42,6 +42,23 @@ type ProcessingState struct {
 	LastUpdated time.Time `json:"last_updated"`
 }
 
+// SymbolTimeline 表示代币的完整时间线状态
+type SymbolTimeline struct {
+	Symbol              string    `json:"symbol"`
+	HistoricalStartDate time.Time `json:"historical_start_date"` // 币安最早可用数据时间
+	CurrentImportDate   time.Time `json:"current_import_date"`   // 当前已导入到的时间
+	LatestAvailableDate time.Time `json:"latest_available_date"` // 币安最新可用数据时间
+	TotalMonths         int       `json:"total_months"`          // 总月份数
+	ImportedMonthsCount int       `json:"imported_months_count"` // 已导入月份数
+	FailedMonthsCount   int       `json:"failed_months_count"`   // 失败月份数
+	ImportProgress      float64   `json:"import_progress"`       // 导入进度百分比
+	Status              string    `json:"status"`               // 状态: discovering, importing, completed, failed
+	LastUpdated         time.Time `json:"last_updated"`
+	AvailableMonths     []string  `json:"available_months"`      // 所有可用月份列表 (YYYY-MM格式)
+	ImportedMonths      []string  `json:"imported_months_list"`  // 已导入月份列表
+	FailedMonths        []string  `json:"failed_months_list"`    // 失败月份列表
+}
+
 // ValidationResult 表示数据验证结果
 type ValidationResult struct {
 	Valid        bool     `json:"valid"`
@@ -99,10 +116,16 @@ type Downloader interface {
 	// GetSymbols 获取所有可用的交易对
 	GetSymbols(ctx context.Context) ([]string, error)
 	
-	// GetAvailableDates 获取指定代币的所有可用月份数据
+	// GetAvailableDates 获取指定交易对的可用日期
 	GetAvailableDates(ctx context.Context, symbol string) ([]time.Time, error)
 	
-	// ValidateURL 验证下载URL是否有效
+	// GetSymbolTimeline 获取指定交易对的完整时间线信息
+	GetSymbolTimeline(ctx context.Context, symbol string) (*SymbolTimeline, error)
+	
+	// GetAllSymbolsFromBinance 从币安数据页面获取所有USDT交易对
+	GetAllSymbolsFromBinance(ctx context.Context) ([]string, error)
+	
+	// ValidateURL 验证URL是否有效
 	ValidateURL(ctx context.Context, url string) error
 }
 
@@ -119,6 +142,18 @@ type StateManager interface {
 	
 	// DeleteState 删除状态
 	DeleteState(symbol string) error
+	
+	// GetTimeline 获取代币时间线状态
+	GetTimeline(symbol string) (*SymbolTimeline, error)
+	
+	// SaveTimeline 保存代币时间线状态
+	SaveTimeline(timeline *SymbolTimeline) error
+	
+	// GetAllTimelines 获取所有代币时间线状态
+	GetAllTimelines() (map[string]*SymbolTimeline, error)
+	
+	// DeleteTimeline 删除代币时间线状态
+	DeleteTimeline(symbol string) error
 	
 	// Backup 备份状态
 	Backup() error

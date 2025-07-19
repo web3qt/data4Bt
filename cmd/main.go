@@ -25,7 +25,7 @@ import (
 
 var (
 	configFile = flag.String("config", "config.yml", "Configuration file path")
-	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, status")
+	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, status, discover")
 	symbols    = flag.String("symbols", "", "Comma-separated list of symbols to process (optional)")
 	endDate    = flag.String("end", "", "End date (YYYY-MM-DD)")
 	verbose    = flag.Bool("verbose", false, "Enable verbose logging")
@@ -106,6 +106,8 @@ func executeCommand(ctx context.Context, cfg *config.Config, cmd string) error {
 		return createMaterializedViews(ctx, cfg)
 	case "status":
 		return showStatus(ctx, cfg)
+	case "discover":
+		return discoverSymbols(ctx, cfg)
 	default:
 		return fmt.Errorf("unknown command: %s", cmd)
 	}
@@ -475,6 +477,163 @@ func showStatus(ctx context.Context, cfg *config.Config) error {
 	return nil
 }
 
+// discoverSymbols 发现并显示所有代币的时间线信息
+func discoverSymbols(ctx context.Context, cfg *config.Config) error {
+	fmt.Println("🔍 正在发现币安USDT交易对的完整时间线信息...")
+	fmt.Println()
+	
+	// 初始化组件
+	comps, err := initializeComponents(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize components: %w", err)
+	}
+	defer comps.cleanup()
+	
+	// 获取所有USDT交易对
+	fmt.Println("📡 从币安数据页面获取所有USDT交易对...")
+	allSymbols, err := comps.downloader.GetAllSymbolsFromBinance(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get symbols from Binance: %w", err)
+	}
+	
+	fmt.Printf("✅ 发现 %d 个USDT交易对\n\n", len(allSymbols))
+	
+	// 如果指定了特定符号，只处理这些符号
+	var targetSymbols []string
+	if *symbols != "" {
+		targetSymbols = strings.Split(*symbols, ",")
+		for i, symbol := range targetSymbols {
+			targetSymbols[i] = strings.TrimSpace(strings.ToUpper(symbol))
+		}
+		fmt.Printf("🎯 只分析指定的 %d 个交易对: %s\n\n", len(targetSymbols), strings.Join(targetSymbols, ", "))
+	} else {
+		targetSymbols = allSymbols
+	}
+	
+	// 分析每个交易对的时间线
+	fmt.Println("📊 正在分析交易对时间线...")
+	var timelines []*domain.SymbolTimeline
+	
+	for i, symbol := range targetSymbols {
+		fmt.Printf("[%d/%d] 分析 %s...", i+1, len(targetSymbols), symbol)
+		
+		timeline, err := comps.downloader.GetSymbolTimeline(ctx, symbol)
+		if err != nil {
+			fmt.Printf(" ❌ 失败: %v\n", err)
+			continue
+		}
+		
+		// 保存时间线到状态管理器
+		if err := comps.stateManager.SaveTimeline(timeline); err != nil {
+			fmt.Printf(" ⚠️  保存失败: %v\n", err)
+		} else {
+			fmt.Printf(" ✅ 完成 (%d个月)\n", timeline.TotalMonths)
+		}
+		
+		timelines = append(timelines, timeline)
+	}
+	
+	fmt.Println()
+	fmt.Printf("🎉 时间线分析完成！成功分析了 %d 个交易对\n\n", len(timelines))
+	
+	// 显示汇总信息
+	displayTimelineSummary(timelines)
+	
+	// 显示详细信息（如果请求）
+	if *detailed {
+		fmt.Println()
+		displayDetailedTimelines(timelines)
+	}
+	
+	fmt.Println()
+	fmt.Println("💡 提示:")
+	fmt.Println("   - 使用 'go run cmd/main.go -cmd=discover -symbols=BTCUSDT,ETHUSDT' 分析特定交易对")
+	fmt.Println("   - 使用 'go run cmd/main.go -cmd=discover -detailed' 查看详细信息")
+	fmt.Println("   - 使用 'go run cmd/main.go -cmd=status' 查看导入状态")
+	
+	return nil
+}
+
+// displayTimelineSummary 显示时间线汇总信息
+func displayTimelineSummary(timelines []*domain.SymbolTimeline) {
+	fmt.Println("📈 时间线汇总:")
+	fmt.Println(strings.Repeat("=", 80))
+	
+	if len(timelines) == 0 {
+		fmt.Println("   没有找到任何时间线数据")
+		return
+	}
+	
+	// 统计信息
+	totalMonths := 0
+	earliestDate := time.Now()
+	latestDate := time.Time{}
+	
+	for _, timeline := range timelines {
+		totalMonths += timeline.TotalMonths
+		if timeline.HistoricalStartDate.Before(earliestDate) {
+			earliestDate = timeline.HistoricalStartDate
+		}
+		if timeline.LatestAvailableDate.After(latestDate) {
+			latestDate = timeline.LatestAvailableDate
+		}
+	}
+	
+	fmt.Printf("   交易对数量: %d\n", len(timelines))
+	fmt.Printf("   总月份数据: %d\n", totalMonths)
+	fmt.Printf("   最早数据: %s\n", earliestDate.Format("2006-01"))
+	fmt.Printf("   最新数据: %s\n", latestDate.Format("2006-01"))
+	
+	// 按月份数排序显示前10
+	sort.Slice(timelines, func(i, j int) bool {
+		return timelines[i].TotalMonths > timelines[j].TotalMonths
+	})
+	
+	fmt.Println()
+	fmt.Println("🏆 数据最丰富的交易对 (前10):")
+	fmt.Printf("%-12s %-8s %-12s %-12s\n", "交易对", "月份数", "开始时间", "结束时间")
+	fmt.Println(strings.Repeat("-", 50))
+	
+	for i, timeline := range timelines {
+		if i >= 10 {
+			break
+		}
+		fmt.Printf("%-12s %-8d %-12s %-12s\n",
+			timeline.Symbol,
+			timeline.TotalMonths,
+			timeline.HistoricalStartDate.Format("2006-01"),
+			timeline.LatestAvailableDate.Format("2006-01"))
+	}
+}
+
+// displayDetailedTimelines 显示详细的时间线信息
+func displayDetailedTimelines(timelines []*domain.SymbolTimeline) {
+	fmt.Println("📋 详细时间线信息:")
+	fmt.Println(strings.Repeat("=", 80))
+	
+	for _, timeline := range timelines {
+		fmt.Printf("\n🪙 %s:\n", timeline.Symbol)
+		fmt.Printf("   状态: %s\n", timeline.Status)
+		fmt.Printf("   总月份: %d\n", timeline.TotalMonths)
+		fmt.Printf("   时间范围: %s 至 %s\n",
+			timeline.HistoricalStartDate.Format("2006-01"),
+			timeline.LatestAvailableDate.Format("2006-01"))
+		
+		if len(timeline.AvailableMonths) > 0 {
+			fmt.Printf("   可用月份: ")
+			if len(timeline.AvailableMonths) <= 12 {
+				// 如果月份不多，显示全部
+				fmt.Printf("%s\n", strings.Join(timeline.AvailableMonths, ", "))
+			} else {
+				// 如果月份很多，只显示前几个和后几个
+				first := timeline.AvailableMonths[:3]
+				last := timeline.AvailableMonths[len(timeline.AvailableMonths)-3:]
+				fmt.Printf("%s ... %s\n", strings.Join(first, ", "), strings.Join(last, ", "))
+			}
+		}
+	}
+}
+
 func init() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
@@ -485,12 +644,14 @@ func init() {
 		fmt.Fprintf(os.Stderr, "  init-db    - Initialize database tables\n")
 		fmt.Fprintf(os.Stderr, "  create-views - Create materialized views\n")
 		fmt.Fprintf(os.Stderr, "  status     - Show download status\n")
+		fmt.Fprintf(os.Stderr, "  discover   - Discover symbol timelines\n")
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  %s -cmd=run -start=2024-01-01 -end=2024-01-31\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=status -detailed\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=validate -symbols=BTCUSDT,ETHUSDT\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=discover -symbols=BTCUSDT -detailed\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=init-db\n", os.Args[0])
 	}
 }

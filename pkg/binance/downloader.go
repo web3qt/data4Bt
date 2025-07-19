@@ -102,15 +102,34 @@ func (d *BinanceDownloader) Fetch(ctx context.Context, task domain.DownloadTask)
 
 // GetSymbols 获取所有可用的交易对
 func (d *BinanceDownloader) GetSymbols(ctx context.Context) ([]string, error) {
+	// 使用新的方法获取所有符号，然后过滤
+	allSymbols, err := d.GetAllSymbolsFromBinance(ctx)
+	if err != nil {
+		return nil, err
+	}
+	
+	// 过滤交易对
+	filteredSymbols := d.filterSymbols(allSymbols)
+	
+	d.logger.Info().
+		Int("total_symbols", len(allSymbols)).
+		Int("filtered_symbols", len(filteredSymbols)).
+		Str("filter", d.filter).
+		Msg("USDT symbols fetched and filtered")
+	
+	return filteredSymbols, nil
+}
+
+// GetAllSymbolsFromBinance 从币安数据页面获取所有USDT交易对
+func (d *BinanceDownloader) GetAllSymbolsFromBinance(ctx context.Context) ([]string, error) {
 	start := time.Now()
 	defer func() {
-		logger.LogPerformance("binance_downloader", "get_symbols", time.Since(start))
+		logger.LogPerformance("binance_downloader", "get_all_symbols_from_binance", time.Since(start))
 	}()
 	
-	d.logger.Info().Msg("Fetching USDT symbols from Binance monthly data directory")
+	d.logger.Info().Msg("Fetching all USDT symbols from Binance monthly data directory")
 	
 	// 从Binance月度数据目录获取USDT结尾的代币列表
-	// 使用正确的Binance数据目录URL格式
 	url := fmt.Sprintf("%s/?prefix=data/spot/monthly/klines/", d.baseURL)
 	
 	d.logger.Debug().
@@ -155,16 +174,11 @@ func (d *BinanceDownloader) GetSymbols(ctx context.Context) ([]string, error) {
 		}
 	}
 	
-	// 过滤交易对
-	filteredSymbols := d.filterSymbols(allSymbols)
-	
 	d.logger.Info().
-		Int("total_symbols", len(allSymbols)).
-		Int("filtered_symbols", len(filteredSymbols)).
-		Str("filter", d.filter).
-		Msg("USDT symbols fetched and filtered")
+		Int("total_usdt_symbols", len(allSymbols)).
+		Msg("All USDT symbols fetched from Binance")
 	
-	return filteredSymbols, nil
+	return allSymbols, nil
 }
 
 // ValidateURL 验证下载URL是否有效
@@ -323,68 +337,247 @@ func (d *BinanceDownloader) BuildDownloadURL(symbol string, date time.Time) stri
 
 // GetAvailableDates 获取指定交易对的可用月份
 func (d *BinanceDownloader) GetAvailableDates(ctx context.Context, symbol string) ([]time.Time, error) {
-	d.logger.Debug().
-		Str("symbol", symbol).
-		Msg("Checking available months for symbol by testing URLs")
+	// 使用更高效的方法：先验证交易对存在，然后使用二分查找找到开始时间
+	now := time.Now()
+	currentDate := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	
-	var availableDates []time.Time
-	
-	// 生成从最近12个月到当前月份的所有月份（为了快速测试）
-	now := time.Now().UTC()
-	startDate := now.AddDate(-1, 0, 0) // 12个月前
-	endDate := now
-	
-	// 遍历每个月份，检查数据是否可用
-	for current := startDate; current.Before(endDate) || current.Equal(endDate); current = current.AddDate(0, 1, 0) {
-		// 构建下载URL
-		downloadURL := d.BuildDownloadURL(symbol, current)
-		
-		// 验证URL是否可访问
-		if err := d.ValidateURL(ctx, downloadURL); err == nil {
-			availableDates = append(availableDates, current)
-			d.logger.Debug().
+	// 首先检查上个月的数据是否存在，确认交易对有效（当前月份可能还未完整）
+	lastMonth := currentDate.AddDate(0, -1, 0)
+	recentURL := d.BuildDownloadURL(symbol, lastMonth)
+	if err := d.ValidateURL(ctx, recentURL); err != nil {
+		// 尝试检查更早的月份
+		twoMonthsAgo := currentDate.AddDate(0, -2, 0)
+		olderURL := d.BuildDownloadURL(symbol, twoMonthsAgo)
+		if err2 := d.ValidateURL(ctx, olderURL); err2 != nil {
+			// 如果连续两个月的数据都不存在，可能交易对无效或已下线
+			d.logger.Warn().
 				Str("symbol", symbol).
-				Str("month", current.Format("2006-01")).
-				Str("url", downloadURL).
-				Msg("Found available monthly data")
-		} else {
-			d.logger.Debug().
-				Str("symbol", symbol).
-				Str("month", current.Format("2006-01")).
-				Str("url", downloadURL).
 				Err(err).
-				Msg("Monthly data not available")
+				Msg("Recent data not available for symbol")
+			return nil, fmt.Errorf("symbol %s appears to be invalid or delisted", symbol)
+		}
+	}
+	
+	// 使用二分查找找到数据开始的时间
+	minDate := time.Date(2017, 8, 1, 0, 0, 0, 0, time.UTC) // 币安历史数据开始时间
+	maxDate := currentDate
+	
+	// 二分查找最早可用的数据
+	var earliestDate time.Time
+	for minDate.Before(maxDate) || minDate.Equal(maxDate) {
+		midDate := time.Date(
+			minDate.Year()+(maxDate.Year()-minDate.Year())/2,
+			minDate.Month()+(maxDate.Month()-minDate.Month())/2,
+			1, 0, 0, 0, 0, time.UTC,
+		)
+		
+		// 如果中间日期和最小日期相同，说明已经找到边界
+		if midDate.Equal(minDate) {
+			break
 		}
 		
-		// 如果是当前月份，停止检查
-		if current.Year() == endDate.Year() && current.Month() == endDate.Month() {
-			break
+		midURL := d.BuildDownloadURL(symbol, midDate)
+		if err := d.ValidateURL(ctx, midURL); err == nil {
+			// 数据存在，尝试更早的时间
+			earliestDate = midDate
+			maxDate = midDate.AddDate(0, -1, 0)
+		} else {
+			// 数据不存在，尝试更晚的时间
+			minDate = midDate.AddDate(0, 1, 0)
+		}
+		
+		// 添加小延迟
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	
+	// 如果没找到最早日期，从最小日期开始
+	if earliestDate.IsZero() {
+		earliestDate = minDate
+	}
+	
+	// 生成从最早日期到当前日期的所有月份
+	var availableDates []time.Time
+	for checkDate := earliestDate; !checkDate.After(currentDate); checkDate = checkDate.AddDate(0, 1, 0) {
+		availableDates = append(availableDates, checkDate)
+	}
+	
+	d.logger.Debug().
+		Str("symbol", symbol).
+		Int("available_months", len(availableDates)).
+		Time("earliest_date", earliestDate).
+		Time("latest_date", currentDate).
+		Msg("Found available dates for symbol")
+	
+	return availableDates, nil
+}
+
+// GetSymbolTimeline 获取指定交易对的完整时间线信息
+func (d *BinanceDownloader) GetSymbolTimeline(ctx context.Context, symbol string) (*domain.SymbolTimeline, error) {
+	start := time.Now()
+	defer func() {
+		logger.LogPerformance("binance_downloader", "get_symbol_timeline", time.Since(start))
+	}()
+	
+	d.logger.Info().
+		Str("symbol", symbol).
+		Msg("Fetching complete timeline for symbol from Binance")
+	
+	// 使用现有的GetAvailableDates方法来获取可用日期
+	availableDates, err := d.GetAvailableDates(ctx, symbol)
+	if err != nil {
+		d.logger.Warn().
+			Str("symbol", symbol).
+			Err(err).
+			Msg("Failed to get available dates for symbol")
+		return nil, fmt.Errorf("failed to get available dates for symbol %s: %w", symbol, err)
+	}
+	
+	if len(availableDates) == 0 {
+		d.logger.Warn().
+			Str("symbol", symbol).
+			Msg("No monthly data found for symbol")
+		return nil, fmt.Errorf("no monthly data found for symbol %s", symbol)
+	}
+	
+	// 将日期转换为月份字符串
+	var availableMonths []string
+	seenMonths := make(map[string]bool)
+	
+	for _, date := range availableDates {
+		month := date.Format("2006-01")
+		if !seenMonths[month] {
+			availableMonths = append(availableMonths, month)
+			seenMonths[month] = true
+		}
+	}
+	
+	// 按时间顺序排序
+	for i := 0; i < len(availableMonths)-1; i++ {
+		for j := i + 1; j < len(availableMonths); j++ {
+			if availableMonths[i] > availableMonths[j] {
+				availableMonths[i], availableMonths[j] = availableMonths[j], availableMonths[i]
+			}
+		}
+	}
+	
+	// 计算时间线信息
+	timeline := &domain.SymbolTimeline{
+		Symbol:          symbol,
+		AvailableMonths: availableMonths,
+		TotalMonths:     len(availableMonths),
+		Status:          "discovering",
+		LastUpdated:     time.Now(),
+	}
+	
+	// 设置历史开始时间和最新可用时间
+	if len(availableMonths) > 0 {
+		if startDate, err := time.Parse("2006-01", availableMonths[0]); err == nil {
+			timeline.HistoricalStartDate = startDate
+		}
+		if endDate, err := time.Parse("2006-01", availableMonths[len(availableMonths)-1]); err == nil {
+			timeline.LatestAvailableDate = endDate
 		}
 	}
 	
 	d.logger.Info().
 		Str("symbol", symbol).
-		Int("available_months", len(availableDates)).
-		Msg("Found available monthly data")
+		Int("total_months", timeline.TotalMonths).
+		Str("start_date", timeline.HistoricalStartDate.Format("2006-01")).
+		Str("end_date", timeline.LatestAvailableDate.Format("2006-01")).
+		Msg("Symbol timeline fetched successfully")
 	
-	return availableDates, nil
+	return timeline, nil
 }
 
 // extractDatesFromHTML 从HTML页面提取月份
 func (d *BinanceDownloader) extractDatesFromHTML(html, symbol string) []time.Time {
+	// 使用新的方法获取月份字符串，然后转换为time.Time
+	monthStrings := d.extractMonthsFromHTML(html, symbol)
+	
+	var dates []time.Time
+	for _, monthStr := range monthStrings {
+		if date, err := time.Parse("2006-01", monthStr); err == nil {
+			dates = append(dates, date)
+		}
+	}
+	
+	return dates
+}
+
+// extractMonthsFromHTML 从HTML页面提取月份字符串
+func (d *BinanceDownloader) extractMonthsFromHTML(html, symbol string) []string {
 	// 匹配文件名格式: SYMBOL-1m-YYYY-MM.zip
 	pattern := fmt.Sprintf(`%s-%s-(\d{4}-\d{2})\.zip`, symbol, d.interval)
 	re := regexp.MustCompile(pattern)
 	matches := re.FindAllStringSubmatch(html, -1)
 	
-	var dates []time.Time
+	var months []string
+	seenMonths := make(map[string]bool) // 去重
+	
 	for _, match := range matches {
 		if len(match) > 1 {
-			if date, err := time.Parse("2006-01", match[1]); err == nil {
-				dates = append(dates, date)
+			month := match[1]
+			if !seenMonths[month] {
+				months = append(months, month)
+				seenMonths[month] = true
 			}
 		}
 	}
 	
-	return dates
+	// 按时间顺序排序
+	for i := 0; i < len(months)-1; i++ {
+		for j := i + 1; j < len(months); j++ {
+			if months[i] > months[j] {
+				months[i], months[j] = months[j], months[i]
+			}
+		}
+	}
+	
+	d.logger.Debug().
+		Str("symbol", symbol).
+		Int("months_found", len(months)).
+		Msg("Extracted months from HTML")
+	
+	return months
+}
+
+// extractMonthsFromS3XML 从S3 XML响应中提取月份信息
+func (d *BinanceDownloader) extractMonthsFromS3XML(xmlContent, symbol string) []string {
+	// 匹配S3 XML中的Key元素，格式: <Key>data/spot/monthly/klines/SYMBOL/1m/SYMBOL-1m-YYYY-MM.zip</Key>
+	pattern := fmt.Sprintf(`<Key>data/spot/monthly/klines/%s/%s/%s-%s-(\d{4}-\d{2})\.zip</Key>`, symbol, d.interval, symbol, d.interval)
+	re := regexp.MustCompile(pattern)
+	matches := re.FindAllStringSubmatch(xmlContent, -1)
+	
+	var months []string
+	seenMonths := make(map[string]bool) // 去重
+	
+	for _, match := range matches {
+		if len(match) > 1 {
+			month := match[1]
+			if !seenMonths[month] {
+				months = append(months, month)
+				seenMonths[month] = true
+			}
+		}
+	}
+	
+	// 按时间顺序排序
+	for i := 0; i < len(months)-1; i++ {
+		for j := i + 1; j < len(months); j++ {
+			if months[i] > months[j] {
+				months[i], months[j] = months[j], months[i]
+			}
+		}
+	}
+	
+	d.logger.Debug().
+		Str("symbol", symbol).
+		Int("months_found", len(months)).
+		Msg("Extracted months from S3 XML")
+	
+	return months
 }

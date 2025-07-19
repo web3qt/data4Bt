@@ -16,11 +16,13 @@ import (
 
 // FileStateManager 基于文件的状态管理器
 type FileStateManager struct {
-	mu          sync.RWMutex
-	filePath    string
-	backupCount int
-	states      map[string]*domain.ProcessingState
-	logger      zerolog.Logger
+	mu            sync.RWMutex
+	filePath      string
+	timelinePath  string
+	backupCount   int
+	states        map[string]*domain.ProcessingState
+	timelines     map[string]*domain.SymbolTimeline
+	logger        zerolog.Logger
 }
 
 // NewFileStateManager 创建新的文件状态管理器
@@ -31,16 +33,26 @@ func NewFileStateManager(cfg config.StateConfig) (*FileStateManager, error) {
 		return nil, fmt.Errorf("failed to create state directory: %w", err)
 	}
 	
+	// 生成时间线文件路径
+	timelinePath := filepath.Join(stateDir, "timelines.json")
+	
 	manager := &FileStateManager{
-		filePath:    cfg.FilePath,
-		backupCount: cfg.BackupCount,
-		states:      make(map[string]*domain.ProcessingState),
-		logger:      logger.GetLogger("state_manager"),
+		filePath:     cfg.FilePath,
+		timelinePath: timelinePath,
+		backupCount:  cfg.BackupCount,
+		states:       make(map[string]*domain.ProcessingState),
+		timelines:    make(map[string]*domain.SymbolTimeline),
+		logger:       logger.GetLogger("state_manager"),
 	}
 	
 	// 加载现有状态
 	if err := manager.load(); err != nil {
 		manager.logger.Warn().Err(err).Msg("Failed to load existing state, starting fresh")
+	}
+	
+	// 加载现有时间线
+	if err := manager.loadTimelines(); err != nil {
+		manager.logger.Warn().Err(err).Msg("Failed to load existing timelines, starting fresh")
 	}
 	
 	return manager, nil
@@ -301,4 +313,119 @@ func (m *FileStateManager) GetProgress() (*domain.ProgressReport, error) {
 		FailedTasks:    failedTasks,
 		Progress:       progress,
 	}, nil
+}
+
+// GetTimeline 获取代币时间线状态
+func (m *FileStateManager) GetTimeline(symbol string) (*domain.SymbolTimeline, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	
+	if timeline, exists := m.timelines[symbol]; exists {
+		// 返回副本以避免并发修改
+		copy := *timeline
+		return &copy, nil
+	}
+	
+	return nil, fmt.Errorf("timeline not found for symbol: %s", symbol)
+}
+
+// SaveTimeline 保存代币时间线状态
+func (m *FileStateManager) SaveTimeline(timeline *domain.SymbolTimeline) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	// 更新最后修改时间
+	timeline.LastUpdated = time.Now()
+	
+	// 保存到内存
+	m.timelines[timeline.Symbol] = timeline
+	
+	// 持久化到文件
+	if err := m.saveTimelines(); err != nil {
+		return fmt.Errorf("failed to save timeline for %s: %w", timeline.Symbol, err)
+	}
+	
+	m.logger.Debug().
+		Str("symbol", timeline.Symbol).
+		Str("status", timeline.Status).
+		Int("total_months", timeline.TotalMonths).
+		Int("imported_months", timeline.ImportedMonthsCount).
+		Msg("Timeline saved successfully")
+	
+	return nil
+}
+
+// GetAllTimelines 获取所有代币时间线状态
+func (m *FileStateManager) GetAllTimelines() (map[string]*domain.SymbolTimeline, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	
+	// 返回副本以避免并发修改
+	result := make(map[string]*domain.SymbolTimeline)
+	for symbol, timeline := range m.timelines {
+		copy := *timeline
+		result[symbol] = &copy
+	}
+	
+	return result, nil
+}
+
+// DeleteTimeline 删除代币时间线状态
+func (m *FileStateManager) DeleteTimeline(symbol string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	delete(m.timelines, symbol)
+	
+	if err := m.saveTimelines(); err != nil {
+		return fmt.Errorf("failed to delete timeline for %s: %w", symbol, err)
+	}
+	
+	m.logger.Info().
+		Str("symbol", symbol).
+		Msg("Timeline deleted successfully")
+	
+	return nil
+}
+
+// loadTimelines 从文件加载时间线状态
+func (m *FileStateManager) loadTimelines() error {
+	if _, err := os.Stat(m.timelinePath); os.IsNotExist(err) {
+		m.logger.Info().Msg("Timeline file does not exist, starting with empty timelines")
+		return nil
+	}
+	
+	data, err := os.ReadFile(m.timelinePath)
+	if err != nil {
+		return fmt.Errorf("failed to read timeline file: %w", err)
+	}
+	
+	if len(data) == 0 {
+		m.logger.Info().Msg("Timeline file is empty, starting with empty timelines")
+		return nil
+	}
+	
+	if err := json.Unmarshal(data, &m.timelines); err != nil {
+		return fmt.Errorf("failed to unmarshal timeline data: %w", err)
+	}
+	
+	m.logger.Info().
+		Int("timeline_count", len(m.timelines)).
+		Msg("Timelines loaded successfully")
+	
+	return nil
+}
+
+// saveTimelines 保存时间线状态到文件
+func (m *FileStateManager) saveTimelines() error {
+	data, err := json.MarshalIndent(m.timelines, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal timeline data: %w", err)
+	}
+	
+	if err := os.WriteFile(m.timelinePath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write timeline file: %w", err)
+	}
+	
+	return nil
 }

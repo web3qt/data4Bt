@@ -148,11 +148,13 @@ func (s *Scheduler) generateTasksWithEndDate(ctx context.Context, symbols []stri
 		allTasks = append(allTasks, tasks...)
 	}
 
-	// 按日期排序任务
+	// 按代币分组，然后按日期排序 - 串行处理每个代币
 	sort.Slice(allTasks, func(i, j int) bool {
-		if allTasks[i].Date.Equal(allTasks[j].Date) {
+		// 首先按代币排序，确保同一代币的任务连续
+		if allTasks[i].Symbol != allTasks[j].Symbol {
 			return allTasks[i].Symbol < allTasks[j].Symbol
 		}
+		// 同一代币内按日期排序
 		return allTasks[i].Date.Before(allTasks[j].Date)
 	})
 
@@ -271,33 +273,45 @@ func (s *Scheduler) processTasks(ctx context.Context, tasks []domain.DownloadTas
 		return nil
 	}
 
-	// 按批次处理
-	batchSize := s.config.BatchDays * s.config.MaxConcurrentSymbols
-	if batchSize <= 0 {
-		batchSize = 100 // 默认批次大小
+	// 按代币分组处理 - 串行处理每个代币
+	symbolTasks := make(map[string][]domain.DownloadTask)
+	for _, task := range tasks {
+		symbolTasks[task.Symbol] = append(symbolTasks[task.Symbol], task)
 	}
+
+	// 获取所有代币并排序，确保处理顺序一致
+	var symbols []string
+	for symbol := range symbolTasks {
+		symbols = append(symbols, symbol)
+	}
+	sort.Strings(symbols)
 
 	s.logger.Info().
 		Int("total_tasks", len(tasks)).
-		Int("batch_size", batchSize).
-		Msg("Processing tasks in batches")
+		Int("symbol_count", len(symbols)).
+		Strs("symbols", symbols).
+		Msg("Processing tasks by symbol (sequential)")
 
-	for i := 0; i < len(tasks); i += batchSize {
-		end := i + batchSize
-		if end > len(tasks) {
-			end = len(tasks)
-		}
-
-		batch := tasks[i:end]
+	// 串行处理每个代币
+	for i, symbol := range symbols {
+		symbolTaskList := symbolTasks[symbol]
+		
 		s.logger.Info().
-			Int("batch_start", i+1).
-			Int("batch_end", end).
-			Int("batch_size", len(batch)).
-			Msg("Processing batch")
+			Int("symbol_index", i+1).
+			Int("total_symbols", len(symbols)).
+			Str("symbol", symbol).
+			Int("symbol_tasks", len(symbolTaskList)).
+			Msg("Starting symbol processing")
 
-		if err := s.importer.ImportData(ctx, batch); err != nil {
-			return fmt.Errorf("failed to import batch %d-%d: %w", i+1, end, err)
+		// 处理当前代币的所有任务
+		if err := s.importer.ImportData(ctx, symbolTaskList); err != nil {
+			return fmt.Errorf("failed to import data for symbol %s: %w", symbol, err)
 		}
+
+		s.logger.Info().
+			Str("symbol", symbol).
+			Int("completed_tasks", len(symbolTaskList)).
+			Msg("Symbol processing completed")
 
 		// 检查上下文是否被取消
 		select {
@@ -306,11 +320,19 @@ func (s *Scheduler) processTasks(ctx context.Context, tasks []domain.DownloadTas
 		default:
 		}
 
-		// 批次间的短暂休息
-		if i+batchSize < len(tasks) {
-			time.Sleep(1 * time.Second)
+		// 代币间的短暂休息
+		if i+1 < len(symbols) {
+			time.Sleep(2 * time.Second)
+			s.logger.Info().
+				Str("next_symbol", symbols[i+1]).
+				Msg("Moving to next symbol")
 		}
 	}
+
+	s.logger.Info().
+		Int("total_symbols_processed", len(symbols)).
+		Int("total_tasks_processed", len(tasks)).
+		Msg("All symbols processing completed")
 
 	return nil
 }
