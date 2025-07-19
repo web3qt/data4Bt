@@ -51,12 +51,18 @@ func NewBinanceDownloader(cfg config.BinanceConfig, downloaderCfg config.Downloa
 
 // Fetch 下载并解压数据
 func (d *BinanceDownloader) Fetch(ctx context.Context, task domain.DownloadTask) ([]byte, error) {
+	// 如果任务中没有URL，则构建URL
+	url := task.URL
+	if url == "" {
+		url = d.BuildDownloadURL(task.Symbol, task.Date)
+	}
+	
 	start := time.Now()
 	defer func() {
 		logger.LogPerformance("binance_downloader", "fetch", time.Since(start), map[string]interface{}{
 			"symbol": task.Symbol,
 			"date":   task.Date.Format("2006-01-02"),
-			"url":    task.URL,
+			"url":    url,
 		})
 	}()
 	
@@ -65,7 +71,7 @@ func (d *BinanceDownloader) Fetch(ctx context.Context, task domain.DownloadTask)
 		if attempt > 0 {
 			d.logger.Warn().
 				Str("symbol", task.Symbol).
-				Str("url", task.URL).
+				Str("url", url).
 				Int("attempt", attempt).
 				Err(lastErr).
 				Msg("Retrying download")
@@ -78,7 +84,7 @@ func (d *BinanceDownloader) Fetch(ctx context.Context, task domain.DownloadTask)
 			}
 		}
 		
-		data, err := d.downloadAndExtract(ctx, task.URL)
+		data, err := d.downloadAndExtract(ctx, url)
 		if err == nil {
 			d.logger.Debug().
 				Str("symbol", task.Symbol).
@@ -101,44 +107,27 @@ func (d *BinanceDownloader) GetSymbols(ctx context.Context) ([]string, error) {
 		logger.LogPerformance("binance_downloader", "get_symbols", time.Since(start))
 	}()
 	
-	// 构造API URL来获取交易对列表
-	url := d.baseURL + d.dataPath + "/"
+	d.logger.Info().Msg("Using predefined symbols list")
 	
-	d.logger.Info().Str("url", url).Msg("Fetching symbols list")
-	
-	// 创建HTTP请求
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+	// 使用预定义的主要交易对列表，避免网页抓取问题
+	allSymbols := []string{
+		"BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT", "XRPUSDT",
+		"SOLUSDT", "DOTUSDT", "DOGEUSDT", "AVAXUSDT", "SHIBUSDT",
+		"LTCUSDT", "LINKUSDT", "BCHUSDT", "XLMUSDT", "UNIUSDT",
+		"ATOMUSDT", "ETCUSDT", "FILUSDT", "TRXUSDT", "EOSUSDT",
+		"AAVEUSDT", "MKRUSDT", "THETAUSDT", "XMRUSDT", "ALGOUSDT",
+		"VETUSDT", "ICPUSDT", "FTMUSDT", "HBARUSDT", "EGLDUSDT",
+		"NEARUSDT", "KLAYUSDT", "FLOWUSDT", "XTZUSDT", "CHZUSDT",
+		"MANAUSDT", "SANDUSDT", "CRVUSDT", "BATUSDT", "ENJUSDT",
+		"ZECUSDT", "COMPUSDT", "OMGUSDT", "ONTUSDT", "QTUMUSDT",
+		"ZILUSDT", "ZRXUSDT", "FETUSDT", "BANDUSDT", "NMRUSDT",
 	}
-	
-	req.Header.Set("User-Agent", d.userAgent)
-	
-	// 发送请求
-	resp, err := d.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-	
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-	
-	// 读取响应
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-	
-	// 解析HTML页面，提取交易对目录
-	symbols := d.extractSymbolsFromHTML(string(body))
 	
 	// 过滤交易对
-	filteredSymbols := d.filterSymbols(symbols)
+	filteredSymbols := d.filterSymbols(allSymbols)
 	
 	d.logger.Info().
-		Int("total_symbols", len(symbols)).
+		Int("total_symbols", len(allSymbols)).
 		Int("filtered_symbols", len(filteredSymbols)).
 		Str("filter", d.filter).
 		Msg("Symbols fetched and filtered")

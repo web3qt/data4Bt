@@ -176,29 +176,58 @@ func (s *Scheduler) generateTasksForSymbolWithEndDate(ctx context.Context, symbo
 		}
 	}
 
+	s.logger.Debug().
+		Str("symbol", symbol).
+		Str("state_last_date", state.LastDate.Format("2006-01-02")).
+		Bool("state_is_zero", state.LastDate.IsZero()).
+		Msg("Retrieved state")
+
 	// 确定起始日期：如果状态中没有记录，从数据库获取最后日期
 	var startDate time.Time
 	if state.LastDate.IsZero() {
 		// 从数据库获取该代币的最后日期
 		lastDate, err := s.repository.GetLastDate(ctx, symbol)
+		s.logger.Debug().
+			Str("symbol", symbol).
+			Str("db_last_date", lastDate.Format("2006-01-02")).
+			Bool("db_last_date_is_zero", lastDate.IsZero()).
+			Msg("Retrieved last date from database")
 		if err != nil {
 			s.logger.Debug().
 				Err(err).
 				Str("symbol", symbol).
 				Msg("Failed to get last date from database, will start from earliest available")
-			// 如果数据库中没有数据，从最早可用日期开始
-			startDate = time.Date(2017, 1, 1, 0, 0, 0, 0, time.UTC) // 币安大约从2017年开始
+			// 如果数据库中没有数据，从最近7天开始
+			startDate = time.Now().AddDate(0, 0, -7)
 		} else if lastDate.IsZero() {
-			// 数据库中没有该代币的数据
-			startDate = time.Date(2017, 1, 1, 0, 0, 0, 0, time.UTC)
+			// 数据库中没有该代币的数据，从最近7天开始
+			startDate = time.Now().AddDate(0, 0, -7)
+			s.logger.Debug().
+				Str("symbol", symbol).
+				Str("calculated_start_date", startDate.Format("2006-01-02")).
+				Msg("Set start date to 7 days ago (no data in DB)")
 		} else {
 			// 从数据库中的最后日期的下一天开始
 			startDate = lastDate.AddDate(0, 0, 1)
+			s.logger.Debug().
+				Str("symbol", symbol).
+				Str("calculated_start_date", startDate.Format("2006-01-02")).
+				Msg("Set start date to day after last DB date")
 		}
 	} else {
 		// 从状态中的最后日期的下一天开始
 		startDate = state.LastDate.AddDate(0, 0, 1)
+		s.logger.Debug().
+			Str("symbol", symbol).
+			Str("calculated_start_date", startDate.Format("2006-01-02")).
+			Msg("Set start date to day after state date")
 	}
+
+	s.logger.Debug().
+		Str("symbol", symbol).
+		Str("start_date", startDate.Format("2006-01-02")).
+		Str("end_date", endDate.Format("2006-01-02")).
+		Msg("Date range determined")
 
 	// 生成日期范围内的任务
 	currentDate := startDate
@@ -216,10 +245,15 @@ func (s *Scheduler) generateTasksForSymbolWithEndDate(ctx context.Context, symbo
 					Str("date", dateStr).
 					Msg("Failed to check data availability")
 			} else if available {
-				tasks = append(tasks, domain.DownloadTask{
+				task := domain.DownloadTask{
 					Symbol: symbol,
 					Date:   currentDate,
-				})
+				}
+				s.logger.Debug().
+					Str("symbol", task.Symbol).
+					Str("date", task.Date.Format("2006-01-02")).
+					Msg("Generated task")
+				tasks = append(tasks, task)
 			}
 		}
 

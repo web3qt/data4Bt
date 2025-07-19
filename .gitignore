@@ -12,6 +12,9 @@ node_modules/
 # Environment variables
 .env
 
+# Configuration files (should be copied from configs/)
+config.yml
+
 # Editor directories and files
 .idea
 .vscode

@@ -146,20 +146,29 @@ func (r *Repository) Save(ctx context.Context, klines []domain.KLine) error {
 
 // GetLastDate 获取指定交易对的最后日期
 func (r *Repository) GetLastDate(ctx context.Context, symbol string) (time.Time, error) {
-	var lastDate time.Time
+	// 首先检查是否有数据
+	var count uint64
+	countQuery := `SELECT count(*) FROM klines_1m WHERE symbol = ?`
+	row := r.conn.QueryRow(ctx, countQuery, symbol)
+	if err := row.Scan(&count); err != nil {
+		return time.Time{}, fmt.Errorf("failed to count records: %w", err)
+	}
 	
+	// 如果没有数据，返回零值
+	if count == 0 {
+		return time.Time{}, nil
+	}
+	
+	// 有数据时才查询最大日期
+	var lastDate time.Time
 	query := `
 		SELECT max(toDate(open_time)) as last_date 
 		FROM klines_1m 
 		WHERE symbol = ?
 	`
 	
-	row := r.conn.QueryRow(ctx, query, symbol)
+	row = r.conn.QueryRow(ctx, query, symbol)
 	if err := row.Scan(&lastDate); err != nil {
-		if err.Error() == "sql: no rows in result set" {
-			// 没有数据，返回零值
-			return time.Time{}, nil
-		}
 		return time.Time{}, fmt.Errorf("failed to get last date: %w", err)
 	}
 	
