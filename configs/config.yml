@@ -1,0 +1,89 @@
+# 币安数据加载器配置文件
+
+# 日志配置
+log:
+  level: "info"  # debug, info, warn, error
+  format: "json" # json, console
+  output: "stdout" # stdout, file
+  file_path: "logs/app.log"
+
+# 币安数据源配置
+binance:
+  base_url: "https://data.binance.vision"
+  data_path: "/data/spot/daily/klines"
+  symbols_filter: "USDT" # 只下载以USDT结尾的交易对
+  interval: "1m"         # K线间隔
+  timeout: 30s           # HTTP请求超时
+  retry_count: 3         # 重试次数
+  retry_delay: 5s        # 重试延迟
+
+# 下载器配置
+downloader:
+  concurrency: 10        # 并发下载数
+  buffer_size: 100       # 通道缓冲区大小
+  user_agent: "BinanceDataLoader/1.0"
+  enable_compression: true
+  max_file_size: 100MB   # 单个文件最大大小
+
+# 解析器配置
+parser:
+  concurrency: 5         # 并发解析数
+  buffer_size: 50        # 通道缓冲区大小
+  validate_data: true    # 是否验证数据
+  skip_invalid_rows: true # 跳过无效行
+
+# 数据库配置
+database:
+  clickhouse:
+    hosts:
+      - "localhost:9000"
+    database: "crypto_data"
+    username: "default"
+    password: ""
+    settings:
+      max_execution_time: 60
+      max_memory_usage: 10000000000
+    compression: "lz4"     # lz4, zstd, none
+    dial_timeout: 30s
+    max_open_conns: 10
+    max_idle_conns: 5
+    conn_max_lifetime: 10m
+
+# 导入器配置
+importer:
+  batch_size: 10000      # 批量插入大小
+  buffer_size: 20        # 通道缓冲区大小
+  flush_interval: 30s    # 强制刷新间隔
+  enable_deduplication: true # 启用去重
+
+# 状态管理配置
+state:
+  storage_type: "file"   # file, database
+  file_path: "state/progress.json"
+  backup_count: 5        # 备份文件数量
+  save_interval: 10s     # 状态保存间隔
+
+# 物化视图配置
+materialized_views:
+  enabled: true
+  intervals:
+    - "5m"
+    - "15m"
+    - "1h"
+    - "4h"
+    - "1d"
+  refresh_interval: 1m   # 刷新间隔
+  parallel_refresh: true # 并行刷新
+
+# 监控配置
+monitoring:
+  enabled: true
+  metrics_port: 8080
+  health_check_port: 8081
+  progress_report_interval: 30s
+
+# 调度配置
+scheduler:
+  end_date: ""             # 结束日期，空表示当前日期
+  batch_days: 7            # 每批处理天数
+  max_concurrent_symbols: 5 # 最大并发处理的交易对数
