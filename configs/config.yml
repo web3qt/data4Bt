@@ -4,7 +4,7 @@
 log:
   level: "info"  # debug, info, warn, error
   format: "json" # json, console
-  output: "stdout" # stdout, file
+  output: "file" # stdout, file
   file_path: "logs/app.log"
 
 # 币安数据源配置

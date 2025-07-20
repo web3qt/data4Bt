@@ -118,17 +118,24 @@ func (s *Scheduler) Run(ctx context.Context) error {
 
 // getSymbols 获取交易对列表
 func (s *Scheduler) getSymbols(ctx context.Context) ([]string, error) {
-	// 从下载器获取可用的交易对
-	allSymbols, err := s.downloader.GetSymbols(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get symbols from downloader: %w", err)
-	}
-
-	s.logger.Debug().
-		Int("total_symbols", len(allSymbols)).
-		Msg("Retrieved all available symbols")
-
-	return allSymbols, nil
+	// 使用硬编码的符号列表进行测试
+	hardcodedSymbols := []string{"BTCUSDT", "ETHUSDT", "ADAUSDT"}
+	
+	s.logger.Info().
+		Strs("symbols", hardcodedSymbols).
+		Msg("Using hardcoded symbols for testing")
+	
+	return hardcodedSymbols, nil
+	
+	// 原始代码保留备用
+	// allSymbols, err := s.downloader.GetSymbols(ctx)
+	// if err != nil {
+	//	return nil, fmt.Errorf("failed to get symbols from downloader: %w", err)
+	// }
+	// s.logger.Debug().
+	//	Int("total_symbols", len(allSymbols)).
+	//	Msg("Retrieved all available symbols")
+	// return allSymbols, nil
 }
 
 // generateTasksWithEndDate 生成下载任务
@@ -186,49 +193,55 @@ func (s *Scheduler) generateTasksForSymbolWithEndDate(ctx context.Context, symbo
 		return tasks, nil
 	}
 
-	// 获取状态信息，确定哪些月份已经处理过
-	state, err := s.stateManager.GetState(symbol)
+	// 对可用月份进行排序，确保按时间顺序处理
+	sort.Slice(availableMonths, func(i, j int) bool {
+		return availableMonths[i].Before(availableMonths[j])
+	})
+
+	s.logger.Info().
+		Str("symbol", symbol).
+		Int("available_months", len(availableMonths)).
+		Str("earliest_month", availableMonths[0].Format("2006-01")).
+		Str("latest_month", availableMonths[len(availableMonths)-1].Format("2006-01")).
+		Msg("Processing all available months in chronological order")
+
+	// 获取该代币的处理状态
+	processingState, err := s.stateManager.GetState(symbol)
 	if err != nil {
-		s.logger.Debug().
+		s.logger.Error().
 			Err(err).
 			Str("symbol", symbol).
-			Msg("No existing state found")
-		state = &domain.ProcessingState{
-			Symbol:   symbol,
-			LastDate: time.Time{},
-		}
+			Msg("Failed to get processing state")
+		return nil, fmt.Errorf("failed to get processing state for %s: %w", symbol, err)
 	}
 
-	// 从数据库获取最后处理的日期
-	lastProcessedDate := state.LastDate
-	if lastProcessedDate.IsZero() {
-		dbLastDate, err := s.repository.GetLastDate(ctx, symbol)
-		if err == nil && !dbLastDate.IsZero() {
-			lastProcessedDate = dbLastDate
-		}
-	}
-
-	s.logger.Debug().
-		Str("symbol", symbol).
-		Str("last_processed_date", lastProcessedDate.Format("2006-01-02")).
-		Int("available_months", len(availableMonths)).
-		Msg("Processing available months")
-
-	// 过滤出需要处理的月份
+	// 生成所有可用月份的任务（按时间顺序）
 	for _, monthDate := range availableMonths {
-		// 跳过未来的月份
-		if monthDate.After(endDate) {
+		// 跳过未来的月份和当前月份（当前月份数据可能不完整）
+		currentMonth := time.Now().UTC().Truncate(24 * time.Hour)
+		currentMonth = time.Date(currentMonth.Year(), currentMonth.Month(), 1, 0, 0, 0, 0, time.UTC)
+		
+		if monthDate.After(endDate) || !monthDate.Before(currentMonth) {
+			s.logger.Debug().
+				Str("symbol", symbol).
+				Str("month", monthDate.Format("2006-01")).
+				Msg("Skipping future or current month")
 			continue
 		}
 
-		// 如果已经处理过这个月份，跳过
-		if !lastProcessedDate.IsZero() {
-			lastProcessedMonth := time.Date(lastProcessedDate.Year(), lastProcessedDate.Month(), 1, 0, 0, 0, 0, time.UTC)
-			if monthDate.Before(lastProcessedMonth) || monthDate.Equal(lastProcessedMonth) {
+		// 检查该月份是否已经处理过
+		// 如果LastDate不为零值且大于等于当前月份的最后一天，则认为该月份已处理
+		if !processingState.LastDate.IsZero() {
+			// 计算当前月份的最后一天
+			nextMonth := monthDate.AddDate(0, 1, 0)
+			lastDayOfMonth := nextMonth.Add(-24 * time.Hour)
+			
+			if processingState.LastDate.After(lastDayOfMonth) || processingState.LastDate.Equal(lastDayOfMonth) {
 				s.logger.Debug().
 					Str("symbol", symbol).
 					Str("month", monthDate.Format("2006-01")).
-					Msg("Skipping already processed month")
+					Str("last_processed", processingState.LastDate.Format("2006-01-02")).
+					Msg("Month already processed, skipping")
 				continue
 			}
 		}
@@ -249,7 +262,7 @@ func (s *Scheduler) generateTasksForSymbolWithEndDate(ctx context.Context, symbo
 		Str("symbol", symbol).
 		Int("total_available", len(availableMonths)).
 		Int("tasks_generated", len(tasks)).
-		Msg("Generated monthly tasks based on Binance availability")
+		Msg("Generated all monthly tasks in chronological order")
 
 	return tasks, nil
 }
@@ -279,6 +292,13 @@ func (s *Scheduler) processTasks(ctx context.Context, tasks []domain.DownloadTas
 		symbolTasks[task.Symbol] = append(symbolTasks[task.Symbol], task)
 	}
 
+	// 对每个代币的任务按时间排序
+	for symbol := range symbolTasks {
+		sort.Slice(symbolTasks[symbol], func(i, j int) bool {
+			return symbolTasks[symbol][i].Date.Before(symbolTasks[symbol][j].Date)
+		})
+	}
+
 	// 获取所有代币并排序，确保处理顺序一致
 	var symbols []string
 	for symbol := range symbolTasks {
@@ -290,7 +310,7 @@ func (s *Scheduler) processTasks(ctx context.Context, tasks []domain.DownloadTas
 		Int("total_tasks", len(tasks)).
 		Int("symbol_count", len(symbols)).
 		Strs("symbols", symbols).
-		Msg("Processing tasks by symbol (sequential)")
+		Msg("Processing tasks by symbol (sequential, chronological order)")
 
 	// 串行处理每个代币
 	for i, symbol := range symbols {
@@ -301,9 +321,11 @@ func (s *Scheduler) processTasks(ctx context.Context, tasks []domain.DownloadTas
 			Int("total_symbols", len(symbols)).
 			Str("symbol", symbol).
 			Int("symbol_tasks", len(symbolTaskList)).
-			Msg("Starting symbol processing")
+			Str("earliest_month", symbolTaskList[0].Date.Format("2006-01")).
+			Str("latest_month", symbolTaskList[len(symbolTaskList)-1].Date.Format("2006-01")).
+			Msg("Starting symbol processing in chronological order")
 
-		// 处理当前代币的所有任务
+		// 处理当前代币的所有任务（按时间顺序）
 		if err := s.importer.ImportData(ctx, symbolTaskList); err != nil {
 			return fmt.Errorf("failed to import data for symbol %s: %w", symbol, err)
 		}
@@ -311,7 +333,7 @@ func (s *Scheduler) processTasks(ctx context.Context, tasks []domain.DownloadTas
 		s.logger.Info().
 			Str("symbol", symbol).
 			Int("completed_tasks", len(symbolTaskList)).
-			Msg("Symbol processing completed")
+			Msg("Symbol processing completed successfully")
 
 		// 检查上下文是否被取消
 		select {

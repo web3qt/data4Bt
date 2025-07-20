@@ -308,6 +308,31 @@ func (r *Repository) ValidateData(ctx context.Context, symbol string, date time.
 	return result, nil
 }
 
+// ClearAllData 清空所有数据表
+func (r *Repository) ClearAllData(ctx context.Context) error {
+	r.logger.Info().Msg("Clearing all data from database")
+	
+	// 清空主表
+	if err := r.conn.Exec(ctx, "TRUNCATE TABLE IF EXISTS klines_1m"); err != nil {
+		r.logger.Error().Err(err).Msg("Failed to truncate klines_1m table")
+		return fmt.Errorf("failed to truncate klines_1m: %w", err)
+	}
+	
+	// 清空物化视图对应的表
+	intervals := []string{"5m", "15m", "1h", "4h", "1d"}
+	for _, interval := range intervals {
+		tableName := fmt.Sprintf("klines_%s", interval)
+		query := fmt.Sprintf("TRUNCATE TABLE IF EXISTS %s", tableName)
+		if err := r.conn.Exec(ctx, query); err != nil {
+			r.logger.Warn().Err(err).Str("table", tableName).Msg("Failed to truncate table")
+			// 继续处理其他表，不返回错误
+		}
+	}
+	
+	r.logger.Info().Msg("All data cleared successfully")
+	return nil
+}
+
 // Close 关闭连接
 func (r *Repository) Close() error {
 	if r.conn != nil {

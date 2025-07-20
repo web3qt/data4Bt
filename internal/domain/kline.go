@@ -104,6 +104,9 @@ type KLineRepository interface {
 	// ValidateData 验证数据完整性
 	ValidateData(ctx context.Context, symbol string, date time.Time) (*ValidationResult, error)
 	
+	// ClearAllData 清空所有数据
+	ClearAllData(ctx context.Context) error
+	
 	// Close 关闭连接
 	Close() error
 }
