@@ -409,17 +409,17 @@ func (r *Repository) createMaterializedView(ctx context.Context, interval string
 	// 获取时间间隔的分钟数
 	intervalMinutes := r.getIntervalMinutes(interval)
 	
-	// 创建物化视图
+	// 创建物化视图 - 最简化版本
 	createViewQuery := fmt.Sprintf(`
 		CREATE MATERIALIZED VIEW IF NOT EXISTS %s TO %s AS
 		SELECT 
 			symbol,
 			toStartOfInterval(open_time, INTERVAL %d MINUTE) as open_time,
 			toStartOfInterval(open_time, INTERVAL %d MINUTE) + INTERVAL %d MINUTE - INTERVAL 1 MILLISECOND as close_time,
-			argMin(open_price, open_time) as open_price,
+			any(open_price) as open_price,
 			max(high_price) as high_price,
 			min(low_price) as low_price,
-			argMax(close_price, open_time) as close_price,
+			anyLast(close_price) as close_price,
 			sum(volume) as volume,
 			sum(quote_asset_volume) as quote_asset_volume,
 			sum(number_of_trades) as number_of_trades,

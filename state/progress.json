@@ -1,90 +1,10 @@
 {
-  "AAVEUSDT": {
-    "symbol": "AAVEUSDT",
-    "last_date": "2024-12-01T00:00:00Z",
-    "total_files": 0,
-    "processed": 51,
-    "failed": 0,
-    "last_updated": "2025-07-20T09:47:02.233926+08:00"
-  },
   "ADAUSDT": {
     "symbol": "ADAUSDT",
-    "last_date": "2025-06-19T10:14:05.83766Z",
+    "last_date": "2019-04-01T00:00:00Z",
     "total_files": 0,
-    "processed": 7,
+    "processed": 13,
     "failed": 0,
-    "last_updated": "2025-07-19T18:15:29.095867+08:00"
-  },
-  "AVAXUSDT": {
-    "symbol": "AVAXUSDT",
-    "last_date": "2025-06-19T10:14:39.808304Z",
-    "total_files": 0,
-    "processed": 7,
-    "failed": 0,
-    "last_updated": "2025-07-19T18:16:08.616589+08:00"
-  },
-  "BNBUSDT": {
-    "symbol": "BNBUSDT",
-    "last_date": "2025-06-19T10:14:00.68544Z",
-    "total_files": 0,
-    "processed": 7,
-    "failed": 0,
-    "last_updated": "2025-07-19T18:17:19.347988+08:00"
-  },
-  "BTCUSDT": {
-    "symbol": "BTCUSDT",
-    "last_date": "2025-06-19T10:13:48.075806Z",
-    "total_files": 0,
-    "processed": 7,
-    "failed": 0,
-    "last_updated": "2025-07-19T18:18:45.528616+08:00"
-  },
-  "DOGEUSDT": {
-    "symbol": "DOGEUSDT",
-    "last_date": "2025-06-19T10:14:31.465413Z",
-    "total_files": 0,
-    "processed": 7,
-    "failed": 0,
-    "last_updated": "2025-07-19T18:19:44.232214+08:00"
-  },
-  "DOTUSDT": {
-    "symbol": "DOTUSDT",
-    "last_date": "2025-06-19T10:14:25.725773Z",
-    "total_files": 0,
-    "processed": 7,
-    "failed": 0,
-    "last_updated": "2025-07-19T18:20:59.785254+08:00"
-  },
-  "ETHUSDT": {
-    "symbol": "ETHUSDT",
-    "last_date": "2025-06-19T10:13:55.409991Z",
-    "total_files": 0,
-    "processed": 7,
-    "failed": 0,
-    "last_updated": "2025-07-19T18:22:14.930431+08:00"
-  },
-  "LTCUSDT": {
-    "symbol": "LTCUSDT",
-    "last_date": "2025-06-19T10:14:45.821057Z",
-    "total_files": 0,
-    "processed": 7,
-    "failed": 0,
-    "last_updated": "2025-07-19T18:23:01.291427+08:00"
-  },
-  "SOLUSDT": {
-    "symbol": "SOLUSDT",
-    "last_date": "2025-06-19T10:14:19.708837Z",
-    "total_files": 0,
-    "processed": 7,
-    "failed": 0,
-    "last_updated": "2025-07-19T18:23:56.533247+08:00"
-  },
-  "XRPUSDT": {
-    "symbol": "XRPUSDT",
-    "last_date": "2025-06-19T10:14:13.01388Z",
-    "total_files": 0,
-    "processed": 7,
-    "failed": 0,
-    "last_updated": "2025-07-19T18:24:49.141605+08:00"
+    "last_updated": "2025-08-06T14:50:04.704712+08:00"
   }
 }

@@ -1,46 +1,14 @@
-version: '3.8'
+# Docker Compose 配置 - 仅用于开发环境
+# 注意：此项目使用现有的共享 ClickHouse 容器 (47d30449ba3e)
+# 该容器运行在端口 8123:8123 和 9000:9000
+# 包含 data4trend 数据库，我们将在其中创建 data4BT 数据库
 
-services:
-  clickhouse:
-    image: clickhouse/clickhouse-server:23.8
-    container_name: data4bt-clickhouse
-    ports:
-      - "8123:8123"  # HTTP interface
-      - "9000:9000"  # Native interface
-    environment:
-      CLICKHOUSE_DB: crypto
-      CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: ""
-    volumes:
-      - clickhouse_data:/var/lib/clickhouse
-      - ./docker/clickhouse/config.xml:/etc/clickhouse-server/config.xml:ro
-      - ./docker/clickhouse/users.xml:/etc/clickhouse-server/users.xml:ro
-    ulimits:
-      nofile:
-        soft: 262144
-        hard: 262144
-    healthcheck:
-      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    restart: unless-stopped
+# 如果需要其他服务，可以在此添加
+services: {}
 
-  # 可选：ClickHouse的Web UI
-  clickhouse-ui:
-    image: spoonest/clickhouse-tabix-web-client:latest
-    container_name: data4bt-clickhouse-ui
-    ports:
-      - "8080:80"
-    depends_on:
-      - clickhouse
-    restart: unless-stopped
-
-volumes:
-  clickhouse_data:
-    driver: local
-
-networks:
-  default:
-    name: data4bt-network
+# 备注：使用现有 ClickHouse 容器的连接信息
+# - 地址: localhost:9000
+# - 用户: default  
+# - 密码: 123456
+# - 现有数据库: data4trend
+# - 新数据库: data4BT

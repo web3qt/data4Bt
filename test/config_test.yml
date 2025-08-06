@@ -27,7 +27,7 @@ database:
   clickhouse:
     host: "localhost"
     port: 9000
-    database: "crypto"
+    database: "data4BT_test"
     username: "default"
     password: ""
     max_open_conns: 10

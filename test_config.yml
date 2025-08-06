@@ -1,0 +1,68 @@
+# 测试配置 - 仅导入一天数据
+log:
+  level: "info"
+  format: "json"
+  output: "stdout"
+
+binance:
+  base_url: "https://data.binance.vision"
+  data_path: "/data/spot/daily/klines"
+  symbols_filter: "USDT"
+  interval: "1m"
+  timeout: 30s
+  retry_count: 2
+  retry_delay: 3s
+
+downloader:
+  concurrency: 1
+  buffer_size: 10
+  user_agent: "BinanceDataLoader/1.0-test"
+  enable_compression: true
+  max_file_size: 100MB
+
+parser:
+  concurrency: 1
+  buffer_size: 10
+  validate_data: true
+  skip_invalid_rows: true
+
+database:
+  clickhouse:
+    hosts:
+      - "localhost:9000"
+    database: "data4BT"
+    username: "default"
+    password: "123456"
+    settings:
+      max_execution_time: 60
+      max_memory_usage: 10000000000
+    compression: "lz4"
+    dial_timeout: 30s
+    max_open_conns: 5
+    max_idle_conns: 2
+    conn_max_lifetime: 5m
+
+importer:
+  batch_size: 1000
+  buffer_size: 10
+  flush_interval: 10s
+  enable_deduplication: true
+
+state:
+  storage_type: "file"
+  file_path: "state/progress.json"
+  backup_count: 3
+  save_interval: 5s
+
+materialized_views:
+  enabled: false  # 暂时禁用，核心功能优先
+
+monitoring:
+  enabled: true
+  metrics_port: 8080
+  progress_report_interval: 10s
+
+scheduler:
+  end_date: "2024-01-02"  # 仅测试一个月的数据
+  batch_days: 1
+  max_concurrent_symbols: 1

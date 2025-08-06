@@ -187,9 +187,9 @@ func setDefaults(v *viper.Viper) {
 	
 	// 数据库默认配置
 	v.SetDefault("database.clickhouse.hosts", []string{"localhost:9000"})
-	v.SetDefault("database.clickhouse.database", "crypto_data")
+	v.SetDefault("database.clickhouse.database", "data4BT")
 	v.SetDefault("database.clickhouse.username", "default")
-	v.SetDefault("database.clickhouse.password", "")
+	v.SetDefault("database.clickhouse.password", "123456")
 	v.SetDefault("database.clickhouse.compression", "lz4")
 	v.SetDefault("database.clickhouse.dial_timeout", "30s")
 	v.SetDefault("database.clickhouse.max_open_conns", 10)
