@@ -25,11 +25,10 @@ parser:
 
 database:
   clickhouse:
-    host: "localhost"
-    port: 9000
-    database: "data4BT_test"
+    hosts: ["localhost:9000"]
+    database: "data4BT"
     username: "default"
-    password: ""
+    password: "123456"
     max_open_conns: 10
     max_idle_conns: 5
     conn_max_lifetime: 300

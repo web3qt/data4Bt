@@ -2,9 +2,9 @@
 
 # 日志配置
 log:
-  level: "info"  # debug, info, warn, error
+  level: "debug"  # debug, info, warn, error
   format: "json" # json, console
-  output: "file" # stdout, file
+  output: "stdout" # stdout, file
   file_path: "logs/app.log"
 
 # 币安数据源配置
@@ -13,9 +13,10 @@ binance:
   data_path: "/data/spot/daily/klines"
   symbols_filter: "USDT" # 只下载以USDT结尾的交易对
   interval: "1m"         # K线间隔
-  timeout: 30s           # HTTP请求超时
-  retry_count: 3         # 重试次数
-  retry_delay: 5s        # 重试延迟
+  timeout: 120s          # HTTP请求超时（增加到2分钟）
+  retry_count: 5         # 重试次数（增加重试次数）
+  retry_delay: 10s       # 重试延迟（增加重试延迟）
+  proxy_url: "http://127.0.0.1:7890"  # 代理服务器地址，如果不需要代理请留空或注释掉
 
 # 下载器配置
 downloader:
@@ -37,14 +38,14 @@ database:
   clickhouse:
     hosts:
       - "localhost:9000"
-    database: "crypto_data"
+    database: "data4BT"
     username: "default"
-    password: ""
+    password: "123456"
     settings:
       max_execution_time: 60
       max_memory_usage: 10000000000
     compression: "lz4"     # lz4, zstd, none
-    dial_timeout: 30s
+    dial_timeout: 60s
     max_open_conns: 10
     max_idle_conns: 5
     conn_max_lifetime: 10m

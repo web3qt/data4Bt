@@ -4,9 +4,11 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -33,8 +35,23 @@ type BinanceDownloader struct {
 
 // NewBinanceDownloader 创建新的币安下载器
 func NewBinanceDownloader(cfg config.BinanceConfig, downloaderCfg config.DownloaderConfig) *BinanceDownloader {
+	log := logger.GetLogger("binance_downloader")
+	
 	client := &http.Client{
 		Timeout: cfg.Timeout,
+	}
+
+	// 配置代理
+	if cfg.ProxyURL != "" {
+		proxyURL, err := url.Parse(cfg.ProxyURL)
+		if err != nil {
+			log.Error().Err(err).Str("proxy_url", cfg.ProxyURL).Msg("Failed to parse proxy URL")
+		} else {
+			client.Transport = &http.Transport{
+				Proxy: http.ProxyURL(proxyURL),
+			}
+			log.Info().Str("proxy_url", cfg.ProxyURL).Msg("Using proxy for HTTP requests")
+		}
 	}
 
 	return &BinanceDownloader{
@@ -46,7 +63,7 @@ func NewBinanceDownloader(cfg config.BinanceConfig, downloaderCfg config.Downloa
 		userAgent:  downloaderCfg.UserAgent,
 		retryCount: cfg.RetryCount,
 		retryDelay: cfg.RetryDelay,
-		logger:     logger.GetLogger("binance_downloader"),
+		logger:     log,
 	}
 }
 
@@ -121,60 +138,86 @@ func (d *BinanceDownloader) GetSymbols(ctx context.Context) ([]string, error) {
 	return filteredSymbols, nil
 }
 
-// GetAllSymbolsFromBinance 从币安数据页面获取所有USDT交易对
+// GetAllSymbolsFromBinance 从币安API获取所有USDT交易对
 func (d *BinanceDownloader) GetAllSymbolsFromBinance(ctx context.Context) ([]string, error) {
 	start := time.Now()
 	defer func() {
 		logger.LogPerformance("binance_downloader", "get_all_symbols_from_binance", time.Since(start))
 	}()
 
-	d.logger.Info().Msg("Fetching all USDT symbols from Binance monthly data directory")
+	d.logger.Info().Msg("Fetching all USDT symbols from Binance API")
 
-	// 从Binance月度数据目录获取USDT结尾的代币列表
-	url := fmt.Sprintf("%s/?prefix=data/spot/monthly/klines/", d.baseURL)
+	// 使用Binance API获取交易信息
+	url := "https://api.binance.com/api/v3/exchangeInfo"
 
-	d.logger.Debug().
-		Str("url", url).
-		Msg("Requesting symbols from Binance")
+	// 添加重试机制
+	var lastErr error
+	for attempt := 0; attempt <= d.retryCount; attempt++ {
+		if attempt > 0 {
+			d.logger.Warn().
+				Str("url", url).
+				Int("attempt", attempt).
+				Err(lastErr).
+				Msg("Retrying API request")
+			time.Sleep(d.retryDelay)
+		}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("User-Agent", d.userAgent)
-
-	resp, err := d.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch symbols page: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		d.logger.Error().
-			Int("status_code", resp.StatusCode).
+		d.logger.Debug().
 			Str("url", url).
-			Msg("Failed to fetch symbols page")
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+			Int("attempt", attempt+1).
+			Msg("Requesting symbols from Binance API")
+
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to create request: %w", err)
+			continue
+		}
+
+		req.Header.Set("User-Agent", d.userAgent)
+
+		resp, err := d.client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to fetch symbols from API: %w", err)
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+			d.logger.Error().
+				Int("status_code", resp.StatusCode).
+				Str("url", url).
+				Msg("Failed to fetch symbols from API")
+			continue
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("failed to read response body: %w", err)
+			continue
+		}
+
+		// 解析JSON响应
+		allSymbols := d.extractUSDTSymbolsFromAPI(body)
+
+		if len(allSymbols) == 0 {
+			lastErr = fmt.Errorf("no USDT symbols found in API response")
+			continue
+		}
+
+		d.logger.Info().
+			Int("total_usdt_symbols", len(allSymbols)).
+			Msg("All USDT symbols fetched from Binance API")
+
+		return allSymbols, nil
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	// 从HTML中提取USDT结尾的交易对
-	allSymbols := d.extractUSDTSymbolsFromHTML(string(body))
-
-	if len(allSymbols) == 0 {
-		d.logger.Warn().Msg("No USDT symbols found, using fallback list")
-	}
-
-	d.logger.Info().
-		Int("total_usdt_symbols", len(allSymbols)).
-		Msg("All USDT symbols fetched from Binance")
-
-	return allSymbols, nil
+	// 如果所有重试都失败了，使用备用列表
+	d.logger.Warn().
+		Err(lastErr).
+		Msg("Failed to get symbols from Binance API after all retries, using fallback list")
+	return d.getFallbackSymbols(), nil
 }
 
 // ValidateURL 验证下载URL是否有效
@@ -584,4 +627,44 @@ func (d *BinanceDownloader) extractMonthsFromS3XML(xmlContent, symbol string) []
 		Msg("Extracted months from S3 XML")
 
 	return months
+}
+
+// extractUSDTSymbolsFromAPI 从Binance API JSON响应中提取USDT交易对
+func (d *BinanceDownloader) extractUSDTSymbolsFromAPI(jsonData []byte) []string {
+	type ExchangeInfo struct {
+		Symbols []struct {
+			Symbol string `json:"symbol"`
+			Status string `json:"status"`
+		} `json:"symbols"`
+	}
+
+	var exchangeInfo ExchangeInfo
+	if err := json.Unmarshal(jsonData, &exchangeInfo); err != nil {
+		d.logger.Error().
+			Err(err).
+			Msg("Failed to parse exchange info JSON")
+		return nil
+	}
+
+	var usdtSymbols []string
+	for _, symbolInfo := range exchangeInfo.Symbols {
+		// 只获取活跃的USDT交易对
+		if symbolInfo.Status == "TRADING" && strings.HasSuffix(symbolInfo.Symbol, "USDT") {
+			usdtSymbols = append(usdtSymbols, symbolInfo.Symbol)
+		}
+	}
+
+	d.logger.Debug().
+		Int("usdt_symbols_found", len(usdtSymbols)).
+		Msg("Extracted USDT symbols from API")
+
+	return usdtSymbols
+}
+
+// getFallbackSymbols 返回备用的USDT交易对列表
+// 当前只返回BTCUSDT用于验证流程
+func (d *BinanceDownloader) getFallbackSymbols() []string {
+	return []string{
+		"BTCUSDT", // 只下载BTC数据进行验证
+	}
 }

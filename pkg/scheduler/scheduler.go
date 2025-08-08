@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -118,24 +119,23 @@ func (s *Scheduler) Run(ctx context.Context) error {
 
 // getSymbols 获取交易对列表
 func (s *Scheduler) getSymbols(ctx context.Context) ([]string, error) {
-	// 使用硬编码的符号列表进行测试
-	hardcodedSymbols := []string{"BTCUSDT", "ETHUSDT", "ADAUSDT"}
+	// 从Binance获取所有USDT交易对
+	allSymbols, err := s.downloader.GetSymbols(ctx)
+	if err != nil {
+		// 如果获取失败，使用备用的硬编码列表
+		s.logger.Warn().
+			Err(err).
+			Msg("Failed to get symbols from Binance, using fallback list")
+		
+		hardcodedSymbols := []string{"BTCUSDT", "ETHUSDT", "ADAUSDT"}
+		return hardcodedSymbols, nil
+	}
 	
 	s.logger.Info().
-		Strs("symbols", hardcodedSymbols).
-		Msg("Using hardcoded symbols for testing")
+		Int("total_symbols", len(allSymbols)).
+		Msg("Retrieved all available symbols from Binance")
 	
-	return hardcodedSymbols, nil
-	
-	// 原始代码保留备用
-	// allSymbols, err := s.downloader.GetSymbols(ctx)
-	// if err != nil {
-	//	return nil, fmt.Errorf("failed to get symbols from downloader: %w", err)
-	// }
-	// s.logger.Debug().
-	//	Int("total_symbols", len(allSymbols)).
-	//	Msg("Retrieved all available symbols")
-	// return allSymbols, nil
+	return allSymbols, nil
 }
 
 // generateTasksWithEndDate 生成下载任务
@@ -355,6 +355,270 @@ func (s *Scheduler) processTasks(ctx context.Context, tasks []domain.DownloadTas
 		Int("total_symbols_processed", len(symbols)).
 		Int("total_tasks_processed", len(tasks)).
 		Msg("All symbols processing completed")
+
+	return nil
+}
+
+// RunConcurrent 并发运行调度器，最大并发数为5
+func (s *Scheduler) RunConcurrent(ctx context.Context) error {
+	// 解析结束日期
+	var endDate time.Time
+	var err error
+	if s.config.EndDate != "" {
+		endDate, err = time.Parse("2006-01-02", s.config.EndDate)
+		if err != nil {
+			return fmt.Errorf("invalid end date: %w", err)
+		}
+	} else {
+		// 默认使用昨天作为结束日期
+		endDate = time.Now().AddDate(0, 0, -1)
+	}
+
+	s.logger.Info().
+		Str("end_date", endDate.Format("2006-01-02")).
+		Int("batch_days", s.config.BatchDays).
+		Int("max_concurrent_symbols", 5).
+		Msg("Starting concurrent scheduler")
+
+	start := time.Now()
+	defer func() {
+		logger.LogPerformance("scheduler", "run_concurrent", time.Since(start), map[string]interface{}{
+			"end_date": endDate.Format("2006-01-02"),
+		})
+	}()
+
+	// 获取可用的交易对
+	symbols, err := s.getSymbols(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get symbols: %w", err)
+	}
+
+	s.logger.Info().
+		Int("symbol_count", len(symbols)).
+		Strs("symbols", symbols[:min(len(symbols), 10)]). // 只显示前10个
+		Msg("Retrieved symbols")
+
+	// 生成下载任务
+	tasks, err := s.generateTasksWithEndDate(ctx, symbols, endDate)
+	if err != nil {
+		return fmt.Errorf("failed to generate tasks: %w", err)
+	}
+
+	s.logger.Info().
+		Int("task_count", len(tasks)).
+		Msg("Generated download tasks")
+
+	// 启动进度报告器
+	if s.progressReporter != nil {
+		if err := s.progressReporter.Start(len(tasks)); err != nil {
+			s.logger.Warn().Err(err).Msg("Failed to start progress reporter")
+		}
+	}
+
+	// 并发处理任务
+	if err := s.processTasksConcurrent(ctx, tasks); err != nil {
+		return fmt.Errorf("failed to process tasks concurrently: %w", err)
+	}
+
+	// 创建物化视图
+	if err := s.createMaterializedViews(ctx); err != nil {
+		s.logger.Warn().Err(err).Msg("Failed to create materialized views")
+	}
+
+	s.logger.Info().
+		Dur("total_duration", time.Since(start)).
+		Msg("Concurrent scheduler completed successfully")
+
+	return nil
+}
+
+// processTasksConcurrent 并发处理任务，最大并发数为5
+func (s *Scheduler) processTasksConcurrent(ctx context.Context, tasks []domain.DownloadTask) error {
+	if len(tasks) == 0 {
+		s.logger.Info().Msg("No tasks to process")
+		return nil
+	}
+
+	// 按代币分组处理
+	symbolTasks := make(map[string][]domain.DownloadTask)
+	for _, task := range tasks {
+		symbolTasks[task.Symbol] = append(symbolTasks[task.Symbol], task)
+	}
+
+	// 对每个代币的任务按时间排序
+	for symbol := range symbolTasks {
+		sort.Slice(symbolTasks[symbol], func(i, j int) bool {
+			return symbolTasks[symbol][i].Date.Before(symbolTasks[symbol][j].Date)
+		})
+	}
+
+	// 获取所有代币并排序
+	var symbols []string
+	for symbol := range symbolTasks {
+		symbols = append(symbols, symbol)
+	}
+	sort.Strings(symbols)
+
+	s.logger.Info().
+		Int("total_tasks", len(tasks)).
+		Int("symbol_count", len(symbols)).
+		Msg("Processing tasks concurrently with max 5 workers")
+
+	// 使用信号量控制并发数
+	semaphore := make(chan struct{}, 5)
+	errChan := make(chan error, len(symbols))
+	var wg sync.WaitGroup
+
+	// 并发处理每个代币
+	for _, symbol := range symbols {
+		wg.Add(1)
+		go func(sym string) {
+			defer wg.Done()
+			
+			// 获取信号量
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+			
+			symbolTaskList := symbolTasks[sym]
+			
+			s.logger.Info().
+				Str("symbol", sym).
+				Int("symbol_tasks", len(symbolTaskList)).
+				Str("earliest_month", symbolTaskList[0].Date.Format("2006-01")).
+				Str("latest_month", symbolTaskList[len(symbolTaskList)-1].Date.Format("2006-01")).
+				Msg("Starting concurrent symbol processing")
+			
+			// 处理当前代币的所有任务
+			if err := s.importer.ImportData(ctx, symbolTaskList); err != nil {
+				errChan <- fmt.Errorf("failed to import data for symbol %s: %w", sym, err)
+				return
+			}
+			
+			s.logger.Info().
+				Str("symbol", sym).
+				Int("completed_tasks", len(symbolTaskList)).
+				Msg("Concurrent symbol processing completed")
+		}(symbol)
+	}
+
+	// 等待所有任务完成
+	go func() {
+		wg.Wait()
+		close(errChan)
+	}()
+
+	// 检查错误
+	for err := range errChan {
+		if err != nil {
+			return err
+		}
+	}
+
+	s.logger.Info().
+		Int("total_symbols_processed", len(symbols)).
+		Int("total_tasks_processed", len(tasks)).
+		Msg("All concurrent tasks processing completed")
+
+	return nil
+}
+
+// UpdateToLatest 更新所有币种到最新数据
+func (s *Scheduler) UpdateToLatest(ctx context.Context) error {
+	s.logger.Info().Msg("Starting update to latest data")
+
+	start := time.Now()
+	defer func() {
+		logger.LogPerformance("scheduler", "update_to_latest", time.Since(start), nil)
+	}()
+
+	// 获取所有币种的当前状态
+	allStates, err := s.stateManager.GetAllStates()
+	if err != nil {
+		return fmt.Errorf("failed to get all states: %w", err)
+	}
+
+	// 获取所有可用的交易对
+	symbols, err := s.getSymbols(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get symbols: %w", err)
+	}
+
+	// 使用当前时间作为结束日期
+	endDate := time.Now().AddDate(0, 0, -1) // 昨天
+
+	var updateTasks []domain.DownloadTask
+
+	// 为每个币种生成更新任务
+	for _, symbol := range symbols {
+		state, exists := allStates[symbol]
+		var startDate time.Time
+
+		if exists && !state.LastDate.IsZero() {
+			// 从上次处理的日期的下一个月开始
+			startDate = state.LastDate.AddDate(0, 1, 0)
+		} else {
+			// 如果没有状态记录，从币安最早可用数据开始
+			availableDates, err := s.downloader.GetAvailableDates(ctx, symbol)
+			if err != nil {
+				s.logger.Warn().Err(err).Str("symbol", symbol).Msg("Failed to get available dates")
+				continue
+			}
+			if len(availableDates) == 0 {
+				continue
+			}
+			startDate = availableDates[0]
+		}
+
+		// 生成从startDate到endDate的任务
+		for current := startDate; current.Before(endDate) || current.Equal(endDate); current = current.AddDate(0, 1, 0) {
+			// 检查这个月份的数据是否在币安可用
+			availableDates, err := s.downloader.GetAvailableDates(ctx, symbol)
+			if err != nil {
+				continue
+			}
+
+			// 检查当前月份是否在可用日期列表中
+			found := false
+			for _, availableDate := range availableDates {
+				if availableDate.Year() == current.Year() && availableDate.Month() == current.Month() {
+					found = true
+					break
+				}
+			}
+
+			if found {
+				updateTasks = append(updateTasks, domain.DownloadTask{
+					Symbol: symbol,
+					Date:   current,
+				})
+			}
+		}
+	}
+
+	if len(updateTasks) == 0 {
+		s.logger.Info().Msg("No update tasks needed, all symbols are up to date")
+		return nil
+	}
+
+	s.logger.Info().
+		Int("update_tasks", len(updateTasks)).
+		Msg("Generated update tasks")
+
+	// 启动进度报告器
+	if s.progressReporter != nil {
+		if err := s.progressReporter.Start(len(updateTasks)); err != nil {
+			s.logger.Warn().Err(err).Msg("Failed to start progress reporter")
+		}
+	}
+
+	// 并发处理更新任务
+	if err := s.processTasksConcurrent(ctx, updateTasks); err != nil {
+		return fmt.Errorf("failed to process update tasks: %w", err)
+	}
+
+	s.logger.Info().
+		Dur("total_duration", time.Since(start)).
+		Msg("Update to latest completed successfully")
 
 	return nil
 }

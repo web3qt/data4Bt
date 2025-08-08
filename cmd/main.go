@@ -25,12 +25,13 @@ import (
 
 var (
 	configFile = flag.String("config", "config.yml", "Configuration file path")
-	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, status, discover")
+	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, status, discover, concurrent, update-latest")
 	symbols    = flag.String("symbols", "", "Comma-separated list of symbols to process (optional)")
 	endDate    = flag.String("end", "", "End date (YYYY-MM-DD)")
 	verbose    = flag.Bool("verbose", false, "Enable verbose logging")
 	version    = flag.Bool("version", false, "Show version information")
 	detailed   = flag.Bool("detailed", false, "Show detailed status information")
+	concurrent = flag.Bool("concurrent", false, "Enable concurrent mode")
 )
 
 const (
@@ -97,7 +98,15 @@ func main() {
 func executeCommand(ctx context.Context, cfg *config.Config, cmd string) error {
 	switch cmd {
 	case "run":
-		return runDataLoader(ctx, cfg)
+		if *concurrent {
+			return runConcurrentDataLoader(ctx, cfg)
+		} else {
+			return runDataLoader(ctx, cfg)
+		}
+	case "concurrent":
+		return runConcurrentDataLoader(ctx, cfg)
+	case "update-latest":
+		return updateToLatest(ctx, cfg)
 	case "validate":
 		return validateData(ctx, cfg)
 	case "init-db":
@@ -159,6 +168,95 @@ func runDataLoader(ctx context.Context, cfg *config.Config) error {
 	}
 
 	log.Info().Msg("Data loader completed successfully")
+	return nil
+}
+
+func runConcurrentDataLoader(ctx context.Context, cfg *config.Config) error {
+	log := logger.GetLogger("concurrent_data_loader")
+	log.Info().Msg("Starting concurrent data loader")
+
+	// 初始化组件
+	components, err := initializeComponents(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize components: %w", err)
+	}
+	defer components.cleanup()
+
+	// 初始化数据库表
+	if err := components.repository.CreateTables(ctx); err != nil {
+		return fmt.Errorf("failed to create tables: %w", err)
+	}
+
+	// 解析日期参数
+	endDateTime, err := parseDateRange(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to parse date range: %w", err)
+	}
+
+	// 更新调度器配置
+	cfg.Scheduler.EndDate = endDateTime.Format("2006-01-02")
+
+	// 创建调度器
+	scheduler := scheduler.NewScheduler(
+		cfg.Scheduler,
+		components.downloader,
+		components.importer,
+		components.stateManager,
+		components.progressReporter,
+		components.repository,
+	)
+
+	// 运行并发调度器
+	if err := scheduler.RunConcurrent(ctx); err != nil {
+		return fmt.Errorf("concurrent scheduler execution failed: %w", err)
+	}
+
+	// 停止调度器
+	if err := scheduler.Stop(ctx); err != nil {
+		log.Warn().Err(err).Msg("Failed to stop scheduler gracefully")
+	}
+
+	log.Info().Msg("Concurrent data loader completed successfully")
+	return nil
+}
+
+func updateToLatest(ctx context.Context, cfg *config.Config) error {
+	log := logger.GetLogger("update_to_latest")
+	log.Info().Msg("Starting update to latest")
+
+	// 初始化组件
+	components, err := initializeComponents(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize components: %w", err)
+	}
+	defer components.cleanup()
+
+	// 初始化数据库表
+	if err := components.repository.CreateTables(ctx); err != nil {
+		return fmt.Errorf("failed to create tables: %w", err)
+	}
+
+	// 创建调度器
+	scheduler := scheduler.NewScheduler(
+		cfg.Scheduler,
+		components.downloader,
+		components.importer,
+		components.stateManager,
+		components.progressReporter,
+		components.repository,
+	)
+
+	// 执行更新到最新
+	if err := scheduler.UpdateToLatest(ctx); err != nil {
+		return fmt.Errorf("update to latest failed: %w", err)
+	}
+
+	// 停止调度器
+	if err := scheduler.Stop(ctx); err != nil {
+		log.Warn().Err(err).Msg("Failed to stop scheduler gracefully")
+	}
+
+	log.Info().Msg("Update to latest completed successfully")
 	return nil
 }
 
@@ -356,14 +454,18 @@ func getSymbolList(ctx context.Context, downloader *binance.BinanceDownloader) (
 
 // showStatus 显示下载状态
 func showStatus(ctx context.Context, cfg *config.Config) error {
-	// 初始化状态管理器
-	stateManager, err := state.NewFileStateManager(cfg.State)
+	log := logger.GetLogger("status")
+	log.Info().Msg("Showing system status")
+
+	// 初始化组件
+	components, err := initializeComponents(cfg)
 	if err != nil {
-		return fmt.Errorf("failed to initialize state manager: %w", err)
+		return fmt.Errorf("failed to initialize components: %w", err)
 	}
+	defer components.cleanup()
 
 	// 获取所有状态
-	allStates, err := stateManager.GetAllStates()
+	allStates, err := components.stateManager.GetAllStates()
 	if err != nil {
 		return fmt.Errorf("failed to get states: %w", err)
 	}
@@ -389,7 +491,66 @@ func showStatus(ctx context.Context, cfg *config.Config) error {
 		allStates = filteredStates
 	}
 
-	// 不再需要获取总体进度报告，直接从状态计算
+	// 获取符号时间线
+	timelines, err := components.stateManager.GetAllTimelines()
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to get timelines")
+	} else {
+		log.Info().Int("count", len(timelines)).Msg("Symbol timelines")
+		for symbol, timeline := range timelines {
+			log.Info().
+				Str("symbol", symbol).
+				Time("historical_start", timeline.HistoricalStartDate).
+				Time("current_import", timeline.CurrentImportDate).
+				Time("latest_available", timeline.LatestAvailableDate).
+				Int("total_months", timeline.TotalMonths).
+				Int("imported_months", timeline.ImportedMonthsCount).
+				Time("last_updated", timeline.LastUpdated).
+				Msg("Timeline")
+		}
+	}
+
+	// 获取worker状态
+	workerStates, err := components.stateManager.GetAllWorkerStates()
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to get worker states")
+	} else {
+		log.Info().Int("count", len(workerStates)).Msg("Worker states")
+		for workerID, state := range workerStates {
+			log.Info().
+				Int("worker_id", workerID).
+				Str("status", state.Status).
+				Str("current_symbol", state.CurrentSymbol).
+				Int("tasks_count", state.TasksCount).
+				Int("completed_tasks", state.CompletedTasks).
+				Int("failed_tasks", state.FailedTasks).
+				Str("error_message", state.ErrorMessage).
+				Time("start_time", state.StartTime).
+				Time("last_update", state.LastUpdate).
+				Msg("Worker state")
+		}
+	}
+
+	// 获取币种进度信息
+	symbolProgresses, err := components.stateManager.GetAllSymbolProgress()
+	if err != nil {
+		log.Warn().Err(err).Msg("Failed to get symbol progress")
+	} else {
+		log.Info().Int("count", len(symbolProgresses)).Msg("Symbol progress information")
+		for symbol, progress := range symbolProgresses {
+			log.Info().
+				Str("symbol", symbol).
+				Str("status", progress.Status).
+				Int("total_months", progress.TotalMonths).
+				Int("completed_months", progress.CompletedMonths).
+				Int("failed_months", progress.FailedMonths).
+				Str("current_month", progress.CurrentMonth).
+				Float64("progress", progress.Progress).
+				Int("worker_id", progress.WorkerID).
+				Time("last_update", progress.LastUpdate).
+				Msg("Symbol progress")
+		}
+	}
 
 	// 显示总体状态
 	fmt.Printf("\n=== Binance 数据下载状态 ===\n\n")
@@ -441,6 +602,22 @@ func showStatus(ctx context.Context, cfg *config.Config) error {
 			fmt.Printf("%-12s %-12s %-8d %-8d %-20s %-10s\n", 
 				symbol, lastDateStr, state.Processed, 
 				state.Failed, lastUpdatedStr, status)
+		}
+		
+		// 显示数据库中的数据统计
+		if timelines != nil && len(timelines) > 0 {
+			fmt.Printf("\n=== 数据库时间范围统计 ===\n")
+			fmt.Printf("%-12s %-20s %-12s\n", "代币", "时间范围", "记录数")
+			fmt.Println(strings.Repeat("-", 50))
+			for _, symbol := range symbolList {
+				if timeline, exists := timelines[symbol]; exists {
+				dateRange := fmt.Sprintf("%s to %s", 
+					timeline.HistoricalStartDate.Format("2006-01-02"),
+					timeline.CurrentImportDate.Format("2006-01-02"))
+				fmt.Printf("%-12s %-20s %-12d\n", 
+					symbol, dateRange, timeline.ImportedMonthsCount)
+				}
+			}
 		}
 	} else {
 		// 简化显示

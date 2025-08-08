@@ -16,13 +16,17 @@ import (
 
 // FileStateManager 基于文件的状态管理器
 type FileStateManager struct {
-	mu            sync.RWMutex
-	filePath      string
-	timelinePath  string
-	backupCount   int
-	states        map[string]*domain.ProcessingState
-	timelines     map[string]*domain.SymbolTimeline
-	logger        zerolog.Logger
+	mu               sync.RWMutex
+	filePath         string
+	timelinePath     string
+	workerStatePath  string
+	symbolProgressPath string
+	backupCount      int
+	states           map[string]*domain.ProcessingState
+	timelines        map[string]*domain.SymbolTimeline
+	workerStates     map[int]*domain.WorkerState
+	symbolProgress   map[string]*domain.SymbolProgressInfo
+	logger           zerolog.Logger
 }
 
 // NewFileStateManager 创建新的文件状态管理器
@@ -33,16 +37,22 @@ func NewFileStateManager(cfg config.StateConfig) (*FileStateManager, error) {
 		return nil, fmt.Errorf("failed to create state directory: %w", err)
 	}
 	
-	// 生成时间线文件路径
+	// 生成各种状态文件路径
 	timelinePath := filepath.Join(stateDir, "timelines.json")
+	workerStatePath := filepath.Join(stateDir, "worker_states.json")
+	symbolProgressPath := filepath.Join(stateDir, "symbol_progress.json")
 	
 	manager := &FileStateManager{
-		filePath:     cfg.FilePath,
-		timelinePath: timelinePath,
-		backupCount:  cfg.BackupCount,
-		states:       make(map[string]*domain.ProcessingState),
-		timelines:    make(map[string]*domain.SymbolTimeline),
-		logger:       logger.GetLogger("state_manager"),
+		filePath:           cfg.FilePath,
+		timelinePath:       timelinePath,
+		workerStatePath:    workerStatePath,
+		symbolProgressPath: symbolProgressPath,
+		backupCount:        cfg.BackupCount,
+		states:             make(map[string]*domain.ProcessingState),
+		timelines:          make(map[string]*domain.SymbolTimeline),
+		workerStates:       make(map[int]*domain.WorkerState),
+		symbolProgress:     make(map[string]*domain.SymbolProgressInfo),
+		logger:             logger.GetLogger("state_manager"),
 	}
 	
 	// 加载现有状态
@@ -53,6 +63,16 @@ func NewFileStateManager(cfg config.StateConfig) (*FileStateManager, error) {
 	// 加载现有时间线
 	if err := manager.loadTimelines(); err != nil {
 		manager.logger.Warn().Err(err).Msg("Failed to load existing timelines, starting fresh")
+	}
+	
+	// 加载worker状态
+	if err := manager.loadWorkerStates(); err != nil {
+		manager.logger.Warn().Err(err).Msg("Failed to load existing worker states, starting fresh")
+	}
+	
+	// 加载币种进度
+	if err := manager.loadSymbolProgress(); err != nil {
+		manager.logger.Warn().Err(err).Msg("Failed to load existing symbol progress, starting fresh")
 	}
 	
 	return manager, nil
@@ -67,12 +87,19 @@ func (m *FileStateManager) GetState(symbol string) (*domain.ProcessingState, err
 	if !exists {
 		// 返回默认状态
 		return &domain.ProcessingState{
-			Symbol:      symbol,
-			LastDate:    time.Time{}, // 零值表示从未处理过
-			TotalFiles:  0,
-			Processed:   0,
-			Failed:      0,
-			LastUpdated: time.Now(),
+			Symbol:          symbol,
+			LastDate:        time.Time{}, // 零值表示从未处理过
+			TotalFiles:      0,
+			Processed:       0,
+			Failed:          0,
+			LastUpdated:     time.Now(),
+			Status:          "pending",   // 默认状态为待处理
+			WorkerID:        -1,          // -1表示未分配worker
+			StartDate:       time.Time{},
+			EndDate:         time.Time{},
+			CurrentMonth:    "",
+			ErrorMessage:    "",
+			ProgressPercent: 0.0,
 		}, nil
 	}
 	
@@ -425,6 +452,259 @@ func (m *FileStateManager) saveTimelines() error {
 	
 	if err := os.WriteFile(m.timelinePath, data, 0644); err != nil {
 		return fmt.Errorf("failed to write timeline file: %w", err)
+	}
+	
+	return nil
+}
+
+// UpdateWorkerState 更新worker状态
+func (m *FileStateManager) UpdateWorkerState(workerID int, state *domain.WorkerState) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	// 更新最后修改时间
+	state.LastUpdate = time.Now()
+	
+	// 保存到内存
+	m.workerStates[workerID] = state
+	
+	// 持久化到文件
+	if err := m.saveWorkerStates(); err != nil {
+		return fmt.Errorf("failed to save worker state for worker %d: %w", workerID, err)
+	}
+	
+	m.logger.Debug().
+		Int("worker_id", workerID).
+		Str("status", state.Status).
+		Str("current_symbol", state.CurrentSymbol).
+		Str("current_month", state.CurrentMonth).
+		Msg("Worker state updated")
+	
+	return nil
+}
+
+// GetWorkerState 获取worker状态
+func (m *FileStateManager) GetWorkerState(workerID int) (*domain.WorkerState, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	
+	state, exists := m.workerStates[workerID]
+	if !exists {
+		// 返回默认worker状态
+		return &domain.WorkerState{
+			WorkerID:       workerID,
+			Status:         "idle",
+			CurrentSymbol:  "",
+			CurrentMonth:   "",
+			StartTime:      time.Now(),
+			LastUpdate:     time.Now(),
+			TasksCount:     0,
+			CompletedTasks: 0,
+			FailedTasks:    0,
+			ErrorMessage:   "",
+		}, nil
+	}
+	
+	// 返回状态的副本
+	stateCopy := *state
+	return &stateCopy, nil
+}
+
+// GetAllWorkerStates 获取所有worker状态
+func (m *FileStateManager) GetAllWorkerStates() (map[int]*domain.WorkerState, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	
+	// 返回副本以避免并发修改
+	result := make(map[int]*domain.WorkerState)
+	for workerID, state := range m.workerStates {
+		copy := *state
+		result[workerID] = &copy
+	}
+	
+	return result, nil
+}
+
+// UpdateSymbolProgress 更新币种进度
+func (m *FileStateManager) UpdateSymbolProgress(symbol string, progress *domain.SymbolProgressInfo) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	
+	// 更新最后修改时间
+	progress.LastUpdate = time.Now()
+	
+	// 保存到内存
+	m.symbolProgress[symbol] = progress
+	
+	// 持久化到文件
+	if err := m.saveSymbolProgress(); err != nil {
+		return fmt.Errorf("failed to save symbol progress for %s: %w", symbol, err)
+	}
+	
+	m.logger.Debug().
+		Str("symbol", symbol).
+		Int("total_months", progress.TotalMonths).
+		Int("completed_months", progress.CompletedMonths).
+		Float64("progress", progress.Progress).
+		Msg("Symbol progress updated")
+	
+	return nil
+}
+
+// GetSymbolProgress 获取币种进度
+func (m *FileStateManager) GetSymbolProgress(symbol string) (*domain.SymbolProgressInfo, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	
+	progress, exists := m.symbolProgress[symbol]
+	if !exists {
+		// 返回默认进度
+		return &domain.SymbolProgressInfo{
+			Symbol:          symbol,
+			TotalMonths:     0,
+			CompletedMonths: 0,
+			FailedMonths:    0,
+			CurrentMonth:    "",
+			Progress:        0.0,
+			Status:          "pending",
+			LastUpdate:      time.Now(),
+			WorkerID:        -1,
+		}, nil
+	}
+	
+	// 返回进度的副本
+	progressCopy := *progress
+	return &progressCopy, nil
+}
+
+// GetAllSymbolProgress 获取所有币种进度
+func (m *FileStateManager) GetAllSymbolProgress() (map[string]*domain.SymbolProgressInfo, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	
+	// 返回副本以避免并发修改
+	result := make(map[string]*domain.SymbolProgressInfo)
+	for symbol, progress := range m.symbolProgress {
+		copy := *progress
+		result[symbol] = &copy
+	}
+	
+	return result, nil
+}
+
+// GetIncompleteSymbols 获取未完成的币种列表（用于断点续传）
+func (m *FileStateManager) GetIncompleteSymbols() ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	
+	var incompleteSymbols []string
+	
+	// 检查处理状态
+	for symbol, state := range m.states {
+		if state.Status != "completed" {
+			incompleteSymbols = append(incompleteSymbols, symbol)
+		}
+	}
+	
+	// 检查币种进度
+	for symbol, progress := range m.symbolProgress {
+		if progress.Status != "completed" && progress.Progress < 100.0 {
+			// 避免重复添加
+			found := false
+			for _, existing := range incompleteSymbols {
+				if existing == symbol {
+					found = true
+					break
+				}
+			}
+			if !found {
+				incompleteSymbols = append(incompleteSymbols, symbol)
+			}
+		}
+	}
+	
+	return incompleteSymbols, nil
+}
+
+// loadWorkerStates 从文件加载worker状态
+func (m *FileStateManager) loadWorkerStates() error {
+	if _, err := os.Stat(m.workerStatePath); os.IsNotExist(err) {
+		m.logger.Info().Msg("Worker states file does not exist, starting with empty states")
+		return nil
+	}
+	
+	data, err := os.ReadFile(m.workerStatePath)
+	if err != nil {
+		return fmt.Errorf("failed to read worker states file: %w", err)
+	}
+	
+	if len(data) == 0 {
+		m.logger.Info().Msg("Worker states file is empty, starting with empty states")
+		return nil
+	}
+	
+	if err := json.Unmarshal(data, &m.workerStates); err != nil {
+		return fmt.Errorf("failed to unmarshal worker states data: %w", err)
+	}
+	
+	m.logger.Info().
+		Int("worker_count", len(m.workerStates)).
+		Msg("Worker states loaded successfully")
+	
+	return nil
+}
+
+// saveWorkerStates 保存worker状态到文件
+func (m *FileStateManager) saveWorkerStates() error {
+	data, err := json.MarshalIndent(m.workerStates, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal worker states data: %w", err)
+	}
+	
+	if err := os.WriteFile(m.workerStatePath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write worker states file: %w", err)
+	}
+	
+	return nil
+}
+
+// loadSymbolProgress 从文件加载币种进度
+func (m *FileStateManager) loadSymbolProgress() error {
+	if _, err := os.Stat(m.symbolProgressPath); os.IsNotExist(err) {
+		m.logger.Info().Msg("Symbol progress file does not exist, starting with empty progress")
+		return nil
+	}
+	
+	data, err := os.ReadFile(m.symbolProgressPath)
+	if err != nil {
+		return fmt.Errorf("failed to read symbol progress file: %w", err)
+	}
+	
+	if len(data) == 0 {
+		m.logger.Info().Msg("Symbol progress file is empty, starting with empty progress")
+		return nil
+	}
+	
+	if err := json.Unmarshal(data, &m.symbolProgress); err != nil {
+		return fmt.Errorf("failed to unmarshal symbol progress data: %w", err)
+	}
+	
+	m.logger.Info().
+		Int("symbol_count", len(m.symbolProgress)).
+		Msg("Symbol progress loaded successfully")
+	
+	return nil
+}
+
+// saveSymbolProgress 保存币种进度到文件
+func (m *FileStateManager) saveSymbolProgress() error {
+	data, err := json.MarshalIndent(m.symbolProgress, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal symbol progress data: %w", err)
+	}
+	
+	if err := os.WriteFile(m.symbolProgressPath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write symbol progress file: %w", err)
 	}
 	
 	return nil

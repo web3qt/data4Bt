@@ -62,3 +62,39 @@ fi
 echo "正在查询数据下载状态..."
 echo ""
 eval $CMD
+
+echo ""
+echo "=== 数据库实时统计 ==="
+echo ""
+
+# 检查数据加载器进程状态
+if [ -f ".data_loader_pid" ]; then
+    DATA_LOADER_PID=$(cat .data_loader_pid)
+    if kill -0 $DATA_LOADER_PID 2>/dev/null; then
+        echo "🟢 数据加载器状态: 运行中 (PID: $DATA_LOADER_PID)"
+    else
+        echo "🔴 数据加载器状态: 已停止"
+    fi
+else
+    echo "🔴 数据加载器状态: 未启动"
+fi
+
+echo ""
+echo "📊 数据库表统计:"
+echo "---------------------------------------------"
+
+# 检查ClickHouse连接并查询数据
+if docker exec shared-clickhouse clickhouse-client --database=data4BT --query="SELECT 1" >/dev/null 2>&1; then
+    # 查询1分钟K线数据统计
+    echo "1分钟K线数据:"
+    docker exec shared-clickhouse clickhouse-client --database=data4BT --query='SELECT symbol, COUNT(*) as records, MIN(open_time) as earliest, MAX(close_time) as latest FROM klines_1m GROUP BY symbol ORDER BY COUNT(*) DESC FORMAT PrettyCompact' || echo "  暂无数据"
+    
+    echo ""
+    echo "5分钟K线数据:"
+    docker exec shared-clickhouse clickhouse-client --database=data4BT --query='SELECT symbol, COUNT(*) as records, MIN(open_time) as earliest, MAX(close_time) as latest FROM klines_5m GROUP BY symbol ORDER BY COUNT(*) DESC FORMAT PrettyCompact' || echo "  暂无数据"
+    
+    echo ""
+    echo "💡 提示: 使用 'tail -f logs/data_loader.log' 查看实时日志"
+else
+    echo "❌ 无法连接到ClickHouse数据库"
+fi

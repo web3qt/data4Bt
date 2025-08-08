@@ -38,6 +38,7 @@ type BinanceConfig struct {
 	Timeout       time.Duration `mapstructure:"timeout"`
 	RetryCount    int           `mapstructure:"retry_count"`
 	RetryDelay    time.Duration `mapstructure:"retry_delay"`
+	ProxyURL      string        `mapstructure:"proxy_url"`
 }
 
 // DownloaderConfig 下载器配置

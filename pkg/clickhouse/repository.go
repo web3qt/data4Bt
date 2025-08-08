@@ -409,13 +409,13 @@ func (r *Repository) createMaterializedView(ctx context.Context, interval string
 	// 获取时间间隔的分钟数
 	intervalMinutes := r.getIntervalMinutes(interval)
 	
-	// 创建物化视图 - 最简化版本
+	// 创建物化视图 - 修复GROUP BY问题
 	createViewQuery := fmt.Sprintf(`
 		CREATE MATERIALIZED VIEW IF NOT EXISTS %s TO %s AS
 		SELECT 
 			symbol,
-			toStartOfInterval(open_time, INTERVAL %d MINUTE) as open_time,
-			toStartOfInterval(open_time, INTERVAL %d MINUTE) + INTERVAL %d MINUTE - INTERVAL 1 MILLISECOND as close_time,
+			toStartOfInterval(open_time, toIntervalMinute(%d)) as open_time,
+			toStartOfInterval(open_time, toIntervalMinute(%d)) + toIntervalMinute(%d) - toIntervalMillisecond(1) as close_time,
 			any(open_price) as open_price,
 			max(high_price) as high_price,
 			min(low_price) as low_price,
@@ -428,7 +428,7 @@ func (r *Repository) createMaterializedView(ctx context.Context, interval string
 			'%s' as interval,
 			now() as created_at
 		FROM klines_1m
-		GROUP BY symbol, toStartOfInterval(open_time, INTERVAL %d MINUTE)
+		GROUP BY symbol, toStartOfInterval(open_time, toIntervalMinute(%d))
 	`, viewName, tableName, intervalMinutes, intervalMinutes, intervalMinutes, interval, intervalMinutes)
 	
 	return r.conn.Exec(ctx, createViewQuery)
