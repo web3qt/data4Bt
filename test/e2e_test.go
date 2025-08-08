@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"log"
 	"testing"
-	"time"
 
 	"binance-data-loader/internal/config"
-	"binance-data-loader/internal/domain"
 	"binance-data-loader/pkg/binance"
 	"binance-data-loader/pkg/clickhouse"
 	"binance-data-loader/pkg/importer"

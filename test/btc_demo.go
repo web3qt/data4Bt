@@ -17,7 +17,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-func main() {
+func mainDemo() {
 	ctx := context.Background()
 	
 	// 获取当前目录

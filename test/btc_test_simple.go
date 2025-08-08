@@ -36,7 +36,7 @@ type SimpleConfig struct {
 	} `yaml:"parser"`
 }
 
-func main() {
+func mainTest() {
 	ctx := context.Background()
 	
 	// 加载配置

@@ -8,12 +8,12 @@ import (
 	"path/filepath"
 	"time"
 
-	"../internal/config"
-	"../internal/domain"
-	"../internal/logger"
-	"../pkg/binance"
-	"../pkg/clickhouse"
-	"../pkg/parser"
+	"binance-data-loader/internal/config"
+	"binance-data-loader/internal/domain"
+	"binance-data-loader/internal/logger"
+	"binance-data-loader/pkg/binance"
+	"binance-data-loader/pkg/clickhouse"
+	"binance-data-loader/pkg/parser"
 )
 
 func main() {
@@ -55,7 +55,7 @@ func main() {
 	logger.Info().Msg("Tables created successfully")
 	
 	// 创建下载器
-	downloader := binance.NewDownloader(cfg.Binance)
+	downloader := binance.NewBinanceDownloader(cfg.Binance, cfg.Downloader)
 	
 	// 创建解析器
 	parser := parser.NewCSVParser(cfg.Parser)

@@ -167,6 +167,34 @@ func (m *MockStateManager) Restore(backupPath string) error {
 	return nil
 }
 
+func (m *MockStateManager) GetAllSymbolProgress() (map[string]*domain.SymbolProgressInfo, error) {
+	return nil, nil
+}
+
+func (m *MockStateManager) UpdateWorkerState(workerID int, state *domain.WorkerState) error {
+	return nil
+}
+
+func (m *MockStateManager) GetWorkerState(workerID int) (*domain.WorkerState, error) {
+	return nil, nil
+}
+
+func (m *MockStateManager) GetAllWorkerStates() (map[int]*domain.WorkerState, error) {
+	return nil, nil
+}
+
+func (m *MockStateManager) UpdateSymbolProgress(symbol string, progress *domain.SymbolProgressInfo) error {
+	return nil
+}
+
+func (m *MockStateManager) GetSymbolProgress(symbol string) (*domain.SymbolProgressInfo, error) {
+	return nil, nil
+}
+
+func (m *MockStateManager) GetIncompleteSymbols() ([]string, error) {
+	return nil, nil
+}
+
 func TestImporter_ImportData(t *testing.T) {
 	cfg := config.ImporterConfig{
 		BatchSize:           10,
