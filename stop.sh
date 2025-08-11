@@ -61,24 +61,11 @@ fi
 echo ""
 echo "🐳 检查ClickHouse容器..."
 
-# 检查ClickHouse容器状态
+# 检查ClickHouse容器状态（仅显示信息，不停止）
 CONTAINER_ID=$(docker ps -q --filter "name=clickhouse" --filter "status=running" | head -1)
 if [ -n "$CONTAINER_ID" ]; then
-    echo "🔄 停止ClickHouse容器: $CONTAINER_ID"
-    
-    # 询问用户是否要停止ClickHouse容器
-    echo "⚠️  注意：检测到运行中的ClickHouse容器"
-    echo "   根据配置，这可能是共享的ClickHouse容器，也被其他项目使用"
-    echo ""
-    read -p "是否要停止ClickHouse容器？(y/N): " -n 1 -r
-    echo ""
-    
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        docker stop $CONTAINER_ID
-        echo "✅ ClickHouse容器已停止"
-    else
-        echo "ℹ️  保持ClickHouse容器运行"
-    fi
+    echo "ℹ️  检测到运行中的ClickHouse容器: $CONTAINER_ID"
+    echo "   容器保持运行状态（可能被其他项目使用）"
 else
     echo "ℹ️  未发现运行中的ClickHouse容器"
 fi
