@@ -71,9 +71,10 @@ echo "⚙️  配置系统资源..."
 
 # 设置内存限制（如果支持）
 if command -v ulimit > /dev/null; then
-    ulimit -v 4194304  # 4GB 虚拟内存限制
-    ulimit -m 4194304  # 4GB 物理内存限制
-    echo "✅ 已设置内存限制为4GB"
+    # macOS上某些ulimit选项可能不支持，忽略错误
+    ulimit -v 4194304 2>/dev/null || echo "⚠️  虚拟内存限制设置失败（忽略）"
+    ulimit -m 4194304 2>/dev/null || echo "⚠️  物理内存限制设置失败（忽略）"
+    echo "✅ 内存限制设置完成"
 fi
 
 # 停止已有进程
@@ -93,20 +94,17 @@ if [ -f .data_loader_pid ]; then
     rm -f .data_loader_pid
 fi
 
-# 备份配置文件
+# 检查配置文件
 echo ""
-echo "💾 备份配置文件..."
-if [ -f config.yml ]; then
-    cp config.yml "config_backup_$(date +%Y%m%d_%H%M%S).yml"
+if [ ! -f config.yml ]; then
+    echo "❌ 配置文件 config.yml 不存在"
+    exit 1
 fi
-
-# 使用优化配置
-echo "📝 使用网络优化配置..."
-cp config_optimized.yml config.yml
+echo "📝 使用配置文件: config.yml"
 
 # 设置环境变量
 export GOMAXPROCS=4  # 限制Go程序使用的CPU核心数
-export GOMEMLIMIT=4GB  # Go内存限制
+export GOMEMLIMIT=4GiB  # Go内存限制(使用GiB格式)
 export GODEBUG=gctrace=0  # 关闭GC跟踪减少输出
 
 # 启动程序
@@ -134,7 +132,7 @@ if [ "$1" = "--background" ] || [ "$1" = "-bg" ]; then
 elif [ "$1" = "--test" ] || [ "$1" = "-t" ]; then
     # 测试模式 - 只处理一个交易对
     echo "🧪 测试模式启动..."
-    go run cmd/main.go -cmd=concurrent -config=config.yml -symbols=BTCUSDT -start=2024-01-01 -end=2024-01-07
+    go run cmd/main.go -cmd=concurrent -config=config.yml -symbols=BTCUSDT
     
 else
     # 前台运行模式（默认）
