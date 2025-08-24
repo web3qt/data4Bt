@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -23,11 +24,23 @@ import (
 	"binance-data-loader/pkg/scheduler"
 )
 
+/*
+# 查询所有交易对并保存到文件
+./data_loader -cmd=range-query -output=ranges.txt
+
+# 查询指定交易对并保存
+./data_loader -cmd=range-query -symbols=BTCUSDT,ETHUSDT -output=my_ranges.txt
+
+# 使用短参数名
+./data_loader -cmd=range-query -symbols=BTC,ETH -o=top_coins.txt
+*/
+
 var (
 	configFile = flag.String("config", "config.yml", "Configuration file path")
-	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, status, discover, concurrent, update-latest")
+	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, status, discover, concurrent, update-latest, range-query")
 	symbols    = flag.String("symbols", "", "Comma-separated list of symbols to process (optional)")
 	endDate    = flag.String("end", "", "End date (YYYY-MM-DD)")
+	output     = flag.String("output", "", "Output file path for range-query results (optional)")
 	verbose    = flag.Bool("verbose", false, "Enable verbose logging")
 	version    = flag.Bool("version", false, "Show version information")
 	detailed   = flag.Bool("detailed", false, "Show detailed status information")
@@ -117,6 +130,8 @@ func executeCommand(ctx context.Context, cfg *config.Config, cmd string) error {
 		return showStatus(ctx, cfg)
 	case "discover":
 		return discoverSymbols(ctx, cfg)
+	case "range-query":
+		return queryDataRanges(ctx, cfg)
 	default:
 		return fmt.Errorf("unknown command: %s", cmd)
 	}
@@ -292,10 +307,10 @@ func validateData(ctx context.Context, cfg *config.Config) error {
 		components.progressReporter,
 		components.repository,
 	)
-// 验证数据
-		if err := scheduler.ValidateData(ctx, symbolList, endDateTime); err != nil {
-			return fmt.Errorf("validation failed: %w", err)
-		}
+	// 验证数据
+	if err := scheduler.ValidateData(ctx, symbolList, endDateTime); err != nil {
+		return fmt.Errorf("validation failed: %w", err)
+	}
 
 	log.Info().Msg("Data validation completed")
 	return nil
@@ -576,20 +591,20 @@ func showStatus(ctx context.Context, cfg *config.Config) error {
 
 	// 显示详细状态
 	if *detailed {
-		fmt.Printf("%-12s %-12s %-8s %-8s %-20s %-10s\n", 
+		fmt.Printf("%-12s %-12s %-8s %-8s %-20s %-10s\n",
 			"代币", "最后日期", "已完成", "失败", "最后更新", "状态")
 		fmt.Println(strings.Repeat("-", 80))
-		
+
 		for _, symbol := range symbolList {
 			state := allStates[symbol]
-			
+
 			lastDateStr := "未开始"
 			if !state.LastDate.IsZero() {
 				lastDateStr = state.LastDate.Format("2006-01-02")
 			}
-			
+
 			lastUpdatedStr := state.LastUpdated.Format("2006-01-02 15:04")
-			
+
 			status := "进行中"
 			if state.Failed > 0 {
 				status = "有错误"
@@ -598,12 +613,12 @@ func showStatus(ctx context.Context, cfg *config.Config) error {
 			} else if state.Processed > 0 {
 				status = "已处理"
 			}
-			
-			fmt.Printf("%-12s %-12s %-8d %-8d %-20s %-10s\n", 
-				symbol, lastDateStr, state.Processed, 
+
+			fmt.Printf("%-12s %-12s %-8d %-8d %-20s %-10s\n",
+				symbol, lastDateStr, state.Processed,
 				state.Failed, lastUpdatedStr, status)
 		}
-		
+
 		// 显示数据库中的数据统计
 		if timelines != nil && len(timelines) > 0 {
 			fmt.Printf("\n=== 数据库时间范围统计 ===\n")
@@ -611,11 +626,11 @@ func showStatus(ctx context.Context, cfg *config.Config) error {
 			fmt.Println(strings.Repeat("-", 50))
 			for _, symbol := range symbolList {
 				if timeline, exists := timelines[symbol]; exists {
-				dateRange := fmt.Sprintf("%s to %s", 
-					timeline.HistoricalStartDate.Format("2006-01-02"),
-					timeline.CurrentImportDate.Format("2006-01-02"))
-				fmt.Printf("%-12s %-20s %-12d\n", 
-					symbol, dateRange, timeline.ImportedMonthsCount)
+					dateRange := fmt.Sprintf("%s to %s",
+						timeline.HistoricalStartDate.Format("2006-01-02"),
+						timeline.CurrentImportDate.Format("2006-01-02"))
+					fmt.Printf("%-12s %-20s %-12d\n",
+						symbol, dateRange, timeline.ImportedMonthsCount)
 				}
 			}
 		}
@@ -623,15 +638,15 @@ func showStatus(ctx context.Context, cfg *config.Config) error {
 		// 简化显示
 		fmt.Printf("%-12s %-12s %-8s %-8s\n", "代币", "最后日期", "已完成", "状态")
 		fmt.Println(strings.Repeat("-", 45))
-		
+
 		for _, symbol := range symbolList {
 			state := allStates[symbol]
-			
+
 			lastDateStr := "未开始"
 			if !state.LastDate.IsZero() {
 				lastDateStr = state.LastDate.Format("2006-01-02")
 			}
-			
+
 			status := "进行中"
 			if state.Failed > 0 {
 				status = "有错误"
@@ -640,17 +655,17 @@ func showStatus(ctx context.Context, cfg *config.Config) error {
 			} else if state.Processed > 0 {
 				status = "已处理"
 			}
-			
-			fmt.Printf("%-12s %-12s %-8d %-8s\n", 
+
+			fmt.Printf("%-12s %-12s %-8d %-8s\n",
 				symbol, lastDateStr, state.Processed, status)
 		}
 	}
-	
+
 	fmt.Printf("\n提示：\n")
 	fmt.Printf("- 使用 -detailed 参数查看详细信息\n")
 	fmt.Printf("- 使用 -symbols=BTCUSDT,ETHUSDT 查看特定代币状态\n")
 	fmt.Printf("- 数据存储位置: %s\n", cfg.State.FilePath)
-	
+
 	return nil
 }
 
@@ -658,23 +673,23 @@ func showStatus(ctx context.Context, cfg *config.Config) error {
 func discoverSymbols(ctx context.Context, cfg *config.Config) error {
 	fmt.Println("🔍 正在发现币安USDT交易对的完整时间线信息...")
 	fmt.Println()
-	
+
 	// 初始化组件
 	comps, err := initializeComponents(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to initialize components: %w", err)
 	}
 	defer comps.cleanup()
-	
+
 	// 获取所有USDT交易对
 	fmt.Println("📡 从币安数据页面获取所有USDT交易对...")
 	allSymbols, err := comps.downloader.GetAllSymbolsFromBinance(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get symbols from Binance: %w", err)
 	}
-	
+
 	fmt.Printf("✅ 发现 %d 个USDT交易对\n\n", len(allSymbols))
-	
+
 	// 如果指定了特定符号，只处理这些符号
 	var targetSymbols []string
 	if *symbols != "" {
@@ -686,48 +701,48 @@ func discoverSymbols(ctx context.Context, cfg *config.Config) error {
 	} else {
 		targetSymbols = allSymbols
 	}
-	
+
 	// 分析每个交易对的时间线
 	fmt.Println("📊 正在分析交易对时间线...")
 	var timelines []*domain.SymbolTimeline
-	
+
 	for i, symbol := range targetSymbols {
 		fmt.Printf("[%d/%d] 分析 %s...", i+1, len(targetSymbols), symbol)
-		
+
 		timeline, err := comps.downloader.GetSymbolTimeline(ctx, symbol)
 		if err != nil {
 			fmt.Printf(" ❌ 失败: %v\n", err)
 			continue
 		}
-		
+
 		// 保存时间线到状态管理器
 		if err := comps.stateManager.SaveTimeline(timeline); err != nil {
 			fmt.Printf(" ⚠️  保存失败: %v\n", err)
 		} else {
 			fmt.Printf(" ✅ 完成 (%d个月)\n", timeline.TotalMonths)
 		}
-		
+
 		timelines = append(timelines, timeline)
 	}
-	
+
 	fmt.Println()
 	fmt.Printf("🎉 时间线分析完成！成功分析了 %d 个交易对\n\n", len(timelines))
-	
+
 	// 显示汇总信息
 	displayTimelineSummary(timelines)
-	
+
 	// 显示详细信息（如果请求）
 	if *detailed {
 		fmt.Println()
 		displayDetailedTimelines(timelines)
 	}
-	
+
 	fmt.Println()
 	fmt.Println("💡 提示:")
 	fmt.Println("   - 使用 'go run cmd/main.go -cmd=discover -symbols=BTCUSDT,ETHUSDT' 分析特定交易对")
 	fmt.Println("   - 使用 'go run cmd/main.go -cmd=discover -detailed' 查看详细信息")
 	fmt.Println("   - 使用 'go run cmd/main.go -cmd=status' 查看导入状态")
-	
+
 	return nil
 }
 
@@ -735,17 +750,17 @@ func discoverSymbols(ctx context.Context, cfg *config.Config) error {
 func displayTimelineSummary(timelines []*domain.SymbolTimeline) {
 	fmt.Println("📈 时间线汇总:")
 	fmt.Println(strings.Repeat("=", 80))
-	
+
 	if len(timelines) == 0 {
 		fmt.Println("   没有找到任何时间线数据")
 		return
 	}
-	
+
 	// 统计信息
 	totalMonths := 0
 	earliestDate := time.Now()
 	latestDate := time.Time{}
-	
+
 	for _, timeline := range timelines {
 		totalMonths += timeline.TotalMonths
 		if timeline.HistoricalStartDate.Before(earliestDate) {
@@ -755,22 +770,22 @@ func displayTimelineSummary(timelines []*domain.SymbolTimeline) {
 			latestDate = timeline.LatestAvailableDate
 		}
 	}
-	
+
 	fmt.Printf("   交易对数量: %d\n", len(timelines))
 	fmt.Printf("   总月份数据: %d\n", totalMonths)
 	fmt.Printf("   最早数据: %s\n", earliestDate.Format("2006-01"))
 	fmt.Printf("   最新数据: %s\n", latestDate.Format("2006-01"))
-	
+
 	// 按月份数排序显示前10
 	sort.Slice(timelines, func(i, j int) bool {
 		return timelines[i].TotalMonths > timelines[j].TotalMonths
 	})
-	
+
 	fmt.Println()
 	fmt.Println("🏆 数据最丰富的交易对 (前10):")
 	fmt.Printf("%-12s %-8s %-12s %-12s\n", "交易对", "月份数", "开始时间", "结束时间")
 	fmt.Println(strings.Repeat("-", 50))
-	
+
 	for i, timeline := range timelines {
 		if i >= 10 {
 			break
@@ -787,7 +802,7 @@ func displayTimelineSummary(timelines []*domain.SymbolTimeline) {
 func displayDetailedTimelines(timelines []*domain.SymbolTimeline) {
 	fmt.Println("📋 详细时间线信息:")
 	fmt.Println(strings.Repeat("=", 80))
-	
+
 	for _, timeline := range timelines {
 		fmt.Printf("\n🪙 %s:\n", timeline.Symbol)
 		fmt.Printf("   状态: %s\n", timeline.Status)
@@ -795,7 +810,7 @@ func displayDetailedTimelines(timelines []*domain.SymbolTimeline) {
 		fmt.Printf("   时间范围: %s 至 %s\n",
 			timeline.HistoricalStartDate.Format("2006-01"),
 			timeline.LatestAvailableDate.Format("2006-01"))
-		
+
 		if len(timeline.AvailableMonths) > 0 {
 			fmt.Printf("   可用月份: ")
 			if len(timeline.AvailableMonths) <= 12 {
@@ -811,6 +826,144 @@ func displayDetailedTimelines(timelines []*domain.SymbolTimeline) {
 	}
 }
 
+// queryDataRanges 查询所有 USDT 交易对的历史数据范围
+func queryDataRanges(ctx context.Context, cfg *config.Config) error {
+	fmt.Println("🔍 正在查询币安USDT交易对的历史数据范围...")
+	fmt.Println()
+
+	// 检查是否需要输出到文件
+	var outputFile *os.File
+	var fileWriter *bufio.Writer
+	if *output != "" {
+		var err error
+		outputFile, err = os.Create(*output)
+		if err != nil {
+			return fmt.Errorf("failed to create output file: %w", err)
+		}
+		defer outputFile.Close()
+		fileWriter = bufio.NewWriter(outputFile)
+		defer fileWriter.Flush()
+		fmt.Printf("📁 结果将保存到文件: %s\n\n", *output)
+	}
+
+	// 初始化组件
+	comps, err := initializeComponents(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize components: %w", err)
+	}
+	defer comps.cleanup()
+
+	// 获取所有USDT交易对
+	fmt.Println("📡 从币安数据页面获取所有USDT交易对...")
+	allSymbols, err := comps.downloader.GetAllSymbolsFromBinance(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get symbols from Binance: %w", err)
+	}
+
+	// 如果指定了特定符号，只处理这些符号
+	var targetSymbols []string
+	if *symbols != "" {
+		targetSymbols = strings.Split(*symbols, ",")
+		for i, symbol := range targetSymbols {
+			targetSymbols[i] = strings.TrimSpace(strings.ToUpper(symbol))
+			// 如果没有USDT后缀，自动添加
+			if !strings.HasSuffix(targetSymbols[i], "USDT") {
+				targetSymbols[i] += "USDT"
+			}
+		}
+		fmt.Printf("🎯 查询指定的 %d 个交易对\n\n", len(targetSymbols))
+	} else {
+		targetSymbols = allSymbols
+		fmt.Printf("✅ 发现 %d 个USDT交易对\n\n", len(allSymbols))
+	}
+
+	// 查询每个交易对的数据范围
+	fmt.Println("📊 正在查询数据范围...")
+	fmt.Println()
+
+	type rangeResult struct {
+		symbol    string
+		startDate string
+		endDate   string
+		days      int
+		err       error
+	}
+
+	results := make([]rangeResult, 0, len(targetSymbols))
+
+	for i, symbol := range targetSymbols {
+		// 显示进度
+		fmt.Printf("\r[%d/%d] 查询 %s...", i+1, len(targetSymbols), symbol)
+
+		timeline, err := comps.downloader.GetSymbolTimeline(ctx, symbol)
+		if err != nil {
+			results = append(results, rangeResult{
+				symbol: symbol,
+				err:    err,
+			})
+			continue
+		}
+
+		startDate := timeline.HistoricalStartDate.Format("2006-01-02")
+		endDate := timeline.LatestAvailableDate.Format("2006-01-02")
+
+		// 计算天数差
+		days := int(timeline.LatestAvailableDate.Sub(timeline.HistoricalStartDate).Hours() / 24)
+
+		results = append(results, rangeResult{
+			symbol:    symbol,
+			startDate: startDate,
+			endDate:   endDate,
+			days:      days,
+		})
+	}
+
+	// 清除进度行
+	fmt.Printf("\r%s\r", strings.Repeat(" ", 50))
+
+	// 输出结果
+	fmt.Println("📈 数据范围查询结果:")
+	fmt.Println(strings.Repeat("=", 60))
+
+	// 如果有文件输出，写入文件头部
+	if fileWriter != nil {
+		fileWriter.WriteString("# 币安USDT交易对历史数据范围查询结果\n")
+		fileWriter.WriteString(fmt.Sprintf("# 查询时间: %s\n", time.Now().Format("2006-01-02 15:04:05")))
+		fileWriter.WriteString("# 格式: 交易对: 开始时间 to 结束时间 (天数)\n")
+		fileWriter.WriteString(strings.Repeat("=", 60) + "\n")
+	}
+
+	successCount := 0
+	for _, result := range results {
+		if result.err != nil {
+			outputLine := fmt.Sprintf("%-12s: ❌ 查询失败 - %v", result.symbol, result.err)
+			fmt.Println(outputLine)
+			if fileWriter != nil {
+				fileWriter.WriteString(fmt.Sprintf("%-12s: 查询失败 - %v\n", result.symbol, result.err))
+			}
+		} else {
+			outputLine := fmt.Sprintf("%-12s: %s to %s (%d days)",
+				result.symbol, result.startDate, result.endDate, result.days)
+			fmt.Println(outputLine)
+			if fileWriter != nil {
+				fileWriter.WriteString(outputLine + "\n")
+			}
+			successCount++
+		}
+	}
+
+	// 输出统计信息
+	summaryLine := fmt.Sprintf("\n✅ 查询完成！成功查询 %d/%d 个交易对", successCount, len(results))
+	fmt.Println(summaryLine)
+	if fileWriter != nil {
+		fileWriter.WriteString(fmt.Sprintf("\n# 查询完成！成功查询 %d/%d 个交易对\n", successCount, len(results)))
+		fileWriter.Flush()
+		fmt.Printf("💾 结果已保存到文件: %s\n", *output)
+	}
+
+	return nil
+}
+
 func init() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
@@ -822,13 +975,19 @@ func init() {
 		fmt.Fprintf(os.Stderr, "  create-views - Create materialized views\n")
 		fmt.Fprintf(os.Stderr, "  status     - Show download status\n")
 		fmt.Fprintf(os.Stderr, "  discover   - Discover symbol timelines\n")
+		fmt.Fprintf(os.Stderr, "  range-query - Query historical data ranges\n")
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		flag.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nExamples:\n")
+		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  %s -cmd=run -start=2024-01-01 -end=2024-01-31\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=status -detailed\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=validate -symbols=BTCUSDT,ETHUSDT\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=discover -symbols=BTCUSDT -detailed\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=range-query\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=range-query -symbols=BTCUSDT,ETHUSDT\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=range-query -symbols=BTC\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=range-query -output=ranges.txt\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=range-query -symbols=BTCUSDT -output=btc_range.txt\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=init-db\n", os.Args[0])
 	}
 }
