@@ -12,21 +12,59 @@ echo ""
 # 检查前置条件
 echo "📋 检查前置条件..."
 
-# 检查ClickHouse
-if ! docker ps | grep -q shared-clickhouse; then
+# 检查ClickHouse (支持新旧两种容器)
+CLICKHOUSE_CONTAINER=""
+if docker ps | grep -q data4bt-clickhouse; then
+    CLICKHOUSE_CONTAINER="data4bt-clickhouse"
+    echo "✅ 发现 data4bt-clickhouse 容器"
+elif docker ps | grep -q shared-clickhouse; then
+    CLICKHOUSE_CONTAINER="shared-clickhouse"
+    echo "✅ 发现 shared-clickhouse 容器"
+else
     echo "❌ ClickHouse容器未运行"
     echo "正在启动ClickHouse..."
-    docker compose up -d clickhouse
-    echo "⏱️  等待ClickHouse启动..."
-    sleep 30
+    
+    # 首先尝试使用智能启动脚本
+    if [ -f "./start_clickhouse.sh" ]; then
+        echo "🚀 使用智能启动脚本..."
+        ./start_clickhouse.sh auto
+        # 重新检测容器
+        if docker ps | grep -q data4bt-clickhouse; then
+            CLICKHOUSE_CONTAINER="data4bt-clickhouse"
+        elif docker ps | grep -q shared-clickhouse; then
+            CLICKHOUSE_CONTAINER="shared-clickhouse"
+        fi
+    else
+        # 回退到传统方式
+        docker compose up -d clickhouse
+        echo "⏱️  等待ClickHouse启动..."
+        sleep 30
+        CLICKHOUSE_CONTAINER="data4bt-clickhouse"
+    fi
 fi
 
-# 测试ClickHouse连接
-if ! docker exec shared-clickhouse clickhouse-client --query "SELECT 1" > /dev/null 2>&1; then
-    echo "❌ ClickHouse连接失败"
+# 测试ClickHouse连接 (支持密码认证)
+echo "🔍 测试ClickHouse连接..."
+if [ "$CLICKHOUSE_CONTAINER" = "data4bt-clickhouse" ]; then
+    # 新容器使用密码认证
+    if docker exec $CLICKHOUSE_CONTAINER clickhouse-client --user=default --password=123456 --query "SELECT 1" > /dev/null 2>&1; then
+        echo "✅ ClickHouse连接正常 (新容器，密码认证)"
+    else
+        echo "❌ ClickHouse连接失败 (新容器)"
+        exit 1
+    fi
+elif [ "$CLICKHOUSE_CONTAINER" = "shared-clickhouse" ]; then
+    # 共享容器可能不需要密码
+    if docker exec $CLICKHOUSE_CONTAINER clickhouse-client --query "SELECT 1" > /dev/null 2>&1; then
+        echo "✅ ClickHouse连接正常 (共享容器)"
+    else
+        echo "❌ ClickHouse连接失败 (共享容器)"
+        exit 1
+    fi
+else
+    echo "❌ 未找到有效的ClickHouse容器"
     exit 1
 fi
-echo "✅ ClickHouse连接正常"
 
 # 检查网络连接
 echo ""

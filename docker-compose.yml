@@ -1,14 +1,54 @@
-# Docker Compose 配置 - 仅用于开发环境
-# 注意：此项目使用现有的共享 ClickHouse 容器 (47d30449ba3e)
-# 该容器运行在端口 8123:8123 和 9000:9000
-# 包含 data4trend 数据库，我们将在其中创建 data4BT 数据库
+# Docker Compose 配置 - 支持完整的 ClickHouse 服务
+# 支持 Docker 和非 Docker 两种启动方式
+# 
+# Docker 启动: docker compose up -d
+# 非 Docker: 使用现有的共享容器或本地安装
 
-# 如果需要其他服务，可以在此添加
-services: {}
+version: '3.8'
 
-# 备注：使用现有 ClickHouse 容器的连接信息
-# - 地址: localhost:9000
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8-alpine
+    container_name: data4bt-clickhouse
+    hostname: clickhouse
+    ports:
+      - "8123:8123"  # HTTP接口
+      - "9000:9000"  # Native接口
+    volumes:
+      # 配置文件
+      - ./docker/clickhouse/config.xml:/etc/clickhouse-server/config.xml:ro
+      - ./docker/clickhouse/users.xml:/etc/clickhouse-server/users.xml:ro
+      # 数据库初始化脚本
+      - ./docker/clickhouse/init_database.sql:/docker-entrypoint-initdb.d/init_database.sql:ro
+      # 数据持久化
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+    environment:
+      - CLICKHOUSE_DB=data4BT
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=123456
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - data4bt-network
+
+volumes:
+  clickhouse_data:
+    driver: local
+  clickhouse_logs:
+    driver: local
+
+networks:
+  data4bt-network:
+    driver: bridge
+
+# 备注：连接信息
+# - 地址: localhost:9000 (Native) / localhost:8123 (HTTP)
 # - 用户: default  
 # - 密码: 123456
-# - 现有数据库: data4trend
-# - 新数据库: data4BT
+# - 数据库: data4BT

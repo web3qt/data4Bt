@@ -19,7 +19,7 @@
 
     <users>
         <default>
-            <no_password/>
+            <password>123456</password>
             <networks incl="networks" replace="replace">
                 <ip>::/0</ip>
             </networks>
@@ -29,6 +29,7 @@
                 <database>crypto</database>
                 <database>default</database>
                 <database>system</database>
+                <database>data4BT</database>
             </databases>
             <access_management>1</access_management>
         </default>
