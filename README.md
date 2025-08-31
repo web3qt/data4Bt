@@ -88,7 +88,19 @@ scheduler:
 go run cmd/main.go -cmd=init-db
 ```
 
-### 5. 启动ClickHouse数据库
+### 5. 发现交易对
+
+在开始下载数据之前，建议先发现可用的交易对时间线：
+
+```bash
+# 发现所有USDT交易对的时间线信息
+go run cmd/main.go -cmd=discover
+
+# 或者只发现特定交易对
+go run cmd/main.go -cmd=discover -symbols=BTCUSDT,ETHUSDT
+```
+
+### 6. 启动ClickHouse数据库
 
 在运行主程序之前，需要先启动ClickHouse数据库：
 
@@ -126,26 +138,41 @@ sleep 30
 curl http://localhost:8123/ping
 ```
 
-### 6. 运行数据加载
+### 7. 运行数据加载
 
 ```bash
 # 复制配置文件到项目根目录（如果还没有的话）
 cp configs/config.yml config.yml
 
-# 初始化数据库表
-go run cmd/main.go -cmd=init-db
+# 运行数据加载器（会根据发现的时间线自动下载数据）
+go run cmd/main.go -cmd=run
 
-# 加载指定日期范围的数据
-go run cmd/main.go -cmd=run -start=2024-01-01 -end=2024-01-31
+# 加载到指定结束日期
+go run cmd/main.go -cmd=run -end=2024-01-31
 
 # 加载指定交易对的数据
-go run cmd/main.go -cmd=run -symbols=BTCUSDT,ETHUSDT -start=2024-01-01 -end=2024-01-07
+go run cmd/main.go -cmd=run -symbols=BTCUSDT,ETHUSDT
 ```
 
-### 7. 创建物化视图
+### 8. 创建物化视图
 
 ```bash
 go run cmd/main.go -cmd=create-views
+```
+
+### 9. 定期维护
+
+建议定期运行以下命令来维护数据的完整性：
+
+```bash
+# 每月更新交易对时间范围（当有新的月度数据时）
+go run cmd/main.go -cmd=update-ranges
+
+# 查看数据库中的交易对状态
+go run cmd/main.go -cmd=list-symbols
+
+# 检查下载状态和进度
+go run cmd/main.go -cmd=status -detailed
 ```
 
 ## 快速测试
@@ -173,10 +200,16 @@ go run test/btc_test_simple.go
 使用方法: ./binance-data-loader [选项]
 
 命令:
-  run        - 运行数据加载器 (默认)
-  validate   - 验证现有数据
-  init-db    - 初始化数据库表
-  create-views - 创建物化视图
+  run           - 运行数据加载器 (默认)
+  validate      - 验证现有数据
+  init-db       - 初始化数据库表
+  create-views  - 创建物化视图
+  status        - 显示下载状态
+  discover      - 发现交易对时间线
+  update-latest - 更新到最新数据
+  range-query   - 查询历史数据范围
+  list-symbols  - 列出数据库中的交易对
+  update-ranges - 更新交易对时间范围
 
 选项:
   -config string
@@ -185,14 +218,116 @@ go run test/btc_test_simple.go
         要执行的命令 (默认 "run")
   -symbols string
         要处理的交易对列表，逗号分隔 (可选)
-  -start string
-        开始日期 (YYYY-MM-DD)
   -end string
         结束日期 (YYYY-MM-DD)
+  -output string
+        range-query 结果输出文件路径 (可选)
+  -detailed
+        显示详细状态信息
   -verbose
         启用详细日志
   -version
         显示版本信息
+```
+
+### 命令详细说明
+
+#### 核心命令
+
+**`run` - 运行数据加载器**
+```bash
+# 运行默认配置的数据加载
+go run cmd/main.go -cmd=run
+
+# 加载指定交易对的数据
+go run cmd/main.go -cmd=run -symbols=BTCUSDT,ETHUSDT
+
+# 加载到指定结束日期
+go run cmd/main.go -cmd=run -end=2024-01-31
+```
+
+**`init-db` - 初始化数据库**
+```bash
+# 创建所有必要的数据库表和结构
+go run cmd/main.go -cmd=init-db
+```
+
+**`create-views` - 创建物化视图**
+```bash
+# 创建5m、15m、1h、4h、1d等时间周期的物化视图
+go run cmd/main.go -cmd=create-views
+```
+
+#### 数据管理命令
+
+**`discover` - 发现交易对时间线**
+```bash
+# 发现所有USDT交易对的完整时间线信息
+go run cmd/main.go -cmd=discover
+
+# 发现特定交易对的时间线
+go run cmd/main.go -cmd=discover -symbols=BTCUSDT,ETHUSDT
+
+# 显示详细信息
+go run cmd/main.go -cmd=discover -detailed
+```
+
+**`update-ranges` - 更新交易对时间范围**
+```bash
+# 更新所有交易对的时间范围信息
+go run cmd/main.go -cmd=update-ranges
+
+# 更新特定交易对的时间范围
+go run cmd/main.go -cmd=update-ranges -symbols=BTCUSDT,ETHUSDT
+```
+
+**`list-symbols` - 列出交易对信息**
+```bash
+# 显示数据库中所有交易对的详细信息
+go run cmd/main.go -cmd=list-symbols
+```
+
+#### 查询和分析命令
+
+**`status` - 显示状态**
+```bash
+# 显示下载进度和状态概览
+go run cmd/main.go -cmd=status
+
+# 显示详细状态信息
+go run cmd/main.go -cmd=status -detailed
+```
+
+**`range-query` - 查询数据范围**
+```bash
+# 查询所有交易对的历史数据范围
+go run cmd/main.go -cmd=range-query
+
+# 查询特定交易对并输出到文件
+go run cmd/main.go -cmd=range-query -symbols=BTCUSDT,ETHUSDT -output=ranges.txt
+
+# 查询所有交易对并保存结果
+go run cmd/main.go -cmd=range-query -output=all_ranges.txt
+```
+
+#### 维护命令
+
+**`validate` - 验证数据**
+```bash
+# 验证现有数据的完整性
+go run cmd/main.go -cmd=validate
+
+# 验证特定交易对的数据
+go run cmd/main.go -cmd=validate -symbols=BTCUSDT,ETHUSDT
+```
+
+**`update-latest` - 更新到最新数据**
+```bash
+# 更新所有交易对到最新可用数据
+go run cmd/main.go -cmd=update-latest
+
+# 更新特定交易对到最新数据
+go run cmd/main.go -cmd=update-latest -symbols=BTCUSDT
 ```
 
 ### 配置说明
@@ -386,6 +521,14 @@ MIT License
 欢迎提交Issue和Pull Request！
 
 ## 更新日志
+
+### v1.1.0
+
+- ✨ 新增 `update-ranges` 命令 - 更新交易对时间范围
+- ✨ 新增 `list-symbols` 命令 - 列出数据库中的交易对信息
+- ✨ 增强信号处理机制，支持更快的 Ctrl+C 响应
+- 🔧 优化数据库清理脚本，保留 Docker 容器
+- 📚 完善命令行帮助信息和文档
 
 ### v1.0.0
 

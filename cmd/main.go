@@ -39,7 +39,7 @@ import (
 
 var (
 	configFile = flag.String("config", "config.yml", "Configuration file path")
-	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, status, discover, update-latest, range-query, list-symbols")
+	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, status, discover, update-latest, range-query, list-symbols, update-ranges")
 	symbols    = flag.String("symbols", "", "Comma-separated list of symbols to process (optional)")
 	endDate    = flag.String("end", "", "End date (YYYY-MM-DD)")
 	output     = flag.String("output", "", "Output file path for range-query results (optional)")
@@ -169,6 +169,8 @@ func executeCommand(ctx context.Context, cfg *config.Config, cmd string) error {
 		return queryDataRanges(ctx, cfg)
 	case "list-symbols":
 		return listSymbols(ctx, cfg)
+	case "update-ranges":
+		return updateTimelineRanges(ctx, cfg)
 	default:
 		return fmt.Errorf("unknown command: %s", cmd)
 	}
@@ -1221,6 +1223,8 @@ func init() {
 		fmt.Fprintf(os.Stderr, "  discover   - Discover symbol timelines\n")
 		fmt.Fprintf(os.Stderr, "  update-latest - Update to latest data\n")
 		fmt.Fprintf(os.Stderr, "  range-query - Query historical data ranges\n")
+		fmt.Fprintf(os.Stderr, "  list-symbols - List symbols in database\n")
+		fmt.Fprintf(os.Stderr, "  update-ranges - Update timeline ranges for symbols\n")
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
@@ -1231,6 +1235,8 @@ func init() {
 		fmt.Fprintf(os.Stderr, "  %s -cmd=discover -symbols=BTCUSDT -detailed\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=range-query -symbols=BTCUSDT -output=ranges.txt\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=list-symbols                   # List symbols in database\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=update-ranges                  # Update all symbol ranges\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=update-ranges -symbols=BTCUSDT # Update specific symbol ranges\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=init-db                        # Initialize database\n", os.Args[0])
 	}
 }
@@ -1281,5 +1287,149 @@ func listSymbols(ctx context.Context, cfg *config.Config) error {
 	fmt.Println("================================================================================")
 	fmt.Printf("🎉 总计: %d 个交易对\n", len(symbolInfos))
 	
+	return nil
+}
+
+// updateTimelineRanges 更新所有交易对的时间范围信息
+func updateTimelineRanges(ctx context.Context, cfg *config.Config) error {
+	fmt.Println("📅 更新交易对时间范围信息...")
+	fmt.Println()
+	
+	log := logger.GetLogger("update_ranges")
+	log.Info().Msg("Starting timeline ranges update")
+	
+	// 初始化组件
+	comps, err := initializeComponents(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize components: %w", err)
+	}
+	defer comps.cleanup()
+	
+	// 获取数据库中所有已存储的交易对
+	fmt.Println("🔍 获取数据库中的所有交易对信息...")
+	symbolInfos, err := comps.repository.GetAllSymbolInfos(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get symbol infos: %w", err)
+	}
+	
+	if len(symbolInfos) == 0 {
+		fmt.Println("⚠️  数据库中没有找到交易对信息")
+		fmt.Println("💡 提示: 请先使用 'go run cmd/main.go -cmd=discover' 发现交易对")
+		return nil
+	}
+	
+	fmt.Printf("✅ 发现 %d 个交易对需要更新时间范围\n\n", len(symbolInfos))
+	
+	// 如果指定了特定符号，只处理这些符号
+	var targetSymbols []*domain.SymbolInfo
+	if *symbols != "" {
+		requestedSymbols := strings.Split(*symbols, ",")
+		symbolMap := make(map[string]bool)
+		for _, symbol := range requestedSymbols {
+			symbolMap[strings.TrimSpace(strings.ToUpper(symbol))] = true
+		}
+		
+		for _, info := range symbolInfos {
+			if symbolMap[info.Symbol] {
+				targetSymbols = append(targetSymbols, info)
+			}
+		}
+		
+		if len(targetSymbols) == 0 {
+			return fmt.Errorf("未找到指定的交易对: %s", *symbols)
+		}
+		
+		fmt.Printf("🎯 只更新指定的 %d 个交易对\n\n", len(targetSymbols))
+	} else {
+		targetSymbols = symbolInfos
+	}
+	
+	// 更新每个交易对的时间范围
+	fmt.Println("📊 正在更新交易对时间范围...")
+	updatedCount := 0
+	errorCount := 0
+	
+	for i, oldInfo := range targetSymbols {
+		fmt.Printf("[%d/%d] 更新 %s...", i+1, len(targetSymbols), oldInfo.Symbol)
+		
+		// 获取最新的时间线信息
+		timeline, err := comps.downloader.GetSymbolTimeline(ctx, oldInfo.Symbol)
+		if err != nil {
+			fmt.Printf(" ❌ 失败: %v\n", err)
+			log.Error().Err(err).Str("symbol", oldInfo.Symbol).Msg("Failed to get timeline")
+			errorCount++
+			continue
+		}
+		
+		// 检查是否有更新
+		hasUpdates := false
+		newInfo := *oldInfo // 复制原有信息
+		
+		// 更新最新日期
+		if !timeline.LatestAvailableDate.Equal(oldInfo.LatestDate) {
+			hasUpdates = true
+			newInfo.LatestDate = timeline.LatestAvailableDate
+		}
+		
+		// 更新总月数
+		if int32(timeline.TotalMonths) != oldInfo.TotalMonths {
+			hasUpdates = true
+			newInfo.TotalMonths = int32(timeline.TotalMonths)
+		}
+		
+		// 更新最早日期（虽然通常不会变，但为了保险起见）
+		if !timeline.HistoricalStartDate.Equal(oldInfo.EarliestDate) {
+			hasUpdates = true
+			newInfo.EarliestDate = timeline.HistoricalStartDate
+		}
+		
+		if hasUpdates {
+			// 设置更新时间
+			newInfo.UpdatedAt = time.Now()
+			
+			// 保存到数据库
+			if err := comps.repository.UpdateSymbolInfo(ctx, &newInfo); err != nil {
+				fmt.Printf(" ❌ 数据库更新失败: %v\n", err)
+				log.Error().Err(err).Str("symbol", oldInfo.Symbol).Msg("Failed to update symbol info")
+				errorCount++
+				continue
+			}
+			
+			// 保存时间线到状态管理器
+			if err := comps.stateManager.SaveTimeline(timeline); err != nil {
+				log.Warn().Err(err).Str("symbol", oldInfo.Symbol).Msg("Failed to save timeline to state manager")
+			}
+			
+			fmt.Printf(" ✅ 已更新 (%d个月 -> %d个月)\n", 
+				oldInfo.TotalMonths, timeline.TotalMonths)
+			updatedCount++
+		} else {
+			fmt.Printf(" ⏭️  无需更新 (%d个月)\n", timeline.TotalMonths)
+		}
+		
+		// 检查上下文是否被取消
+		select {
+		case <-ctx.Done():
+			fmt.Printf("\n⚠️  操作被用户取消\n")
+			return ctx.Err()
+		default:
+		}
+	}
+	
+	fmt.Println()
+	fmt.Println("🎉 时间范围更新完成！")
+	fmt.Printf("   ✅ 成功更新: %d 个交易对\n", updatedCount)
+	fmt.Printf("   ⏭️  无需更新: %d 个交易对\n", len(targetSymbols)-updatedCount-errorCount)
+	if errorCount > 0 {
+		fmt.Printf("   ❌ 更新失败: %d 个交易对\n", errorCount)
+	}
+	fmt.Println()
+	
+	log.Info().
+		Int("total", len(targetSymbols)).
+		Int("updated", updatedCount).
+		Int("errors", errorCount).
+		Msg("Timeline ranges update completed")
+		
 	return nil
 }
