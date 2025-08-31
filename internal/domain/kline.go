@@ -127,6 +127,20 @@ type ConcurrentTask struct {
 	RetryCount  int             `json:"retry_count"` // 重试次数
 }
 
+// SymbolInfo 表示交易对基本信息
+type SymbolInfo struct {
+	Symbol       string    `json:"symbol" db:"symbol"`
+	Status       string    `json:"status" db:"status"`                 // TRADING, HALTED, etc.
+	BaseAsset    string    `json:"base_asset" db:"base_asset"`         // 基础资产 (e.g., BTC)
+	QuoteAsset   string    `json:"quote_asset" db:"quote_asset"`       // 报价资产 (e.g., USDT)
+	EarliestDate time.Time `json:"earliest_date" db:"earliest_date"`   // 最早数据日期
+	LatestDate   time.Time `json:"latest_date" db:"latest_date"`       // 最新数据日期
+	TotalMonths  int32     `json:"total_months" db:"total_months"`     // 总月份数
+	DataStatus   string    `json:"data_status" db:"data_status"`       // discovering, available, importing, completed
+	CreatedAt    time.Time `json:"created_at" db:"created_at"`         // 创建时间
+	UpdatedAt    time.Time `json:"updated_at" db:"updated_at"`         // 更新时间
+}
+
 // KLineRepository 定义K线数据存储接口
 type KLineRepository interface {
 	// Save 批量保存K线数据
@@ -152,6 +166,18 @@ type KLineRepository interface {
 	
 	// ClearAllData 清空所有数据
 	ClearAllData(ctx context.Context) error
+	
+	// SaveSymbolInfo 保存交易对信息
+	SaveSymbolInfo(ctx context.Context, symbolInfo *SymbolInfo) error
+	
+	// GetSymbolInfo 获取交易对信息
+	GetSymbolInfo(ctx context.Context, symbol string) (*SymbolInfo, error)
+	
+	// GetAllSymbolInfos 获取所有交易对信息
+	GetAllSymbolInfos(ctx context.Context) ([]*SymbolInfo, error)
+	
+	// UpdateSymbolInfo 更新交易对信息
+	UpdateSymbolInfo(ctx context.Context, symbolInfo *SymbolInfo) error
 	
 	// Close 关闭连接
 	Close() error

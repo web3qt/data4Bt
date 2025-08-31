@@ -237,7 +237,7 @@ importer:
 
 启用监控后，可以通过以下方式查看进度：
 
-1. **Web仪表板**: 访问 `http://localhost:8080`
+1. **Web仪表板**: 访问 `http://localhost:8890`
 2. **API接口**:
    - 总体进度: `GET /progress`
    - 详细进度: `GET /progress/detailed`

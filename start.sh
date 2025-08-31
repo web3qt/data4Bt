@@ -148,8 +148,8 @@ export GODEBUG=gctrace=0  # 关闭GC跟踪减少输出
 # 启动程序
 echo ""
 echo "🎯 启动数据加载器..."
-echo "配置: 网络优化模式"
-echo "监控地址: http://localhost:8080"
+echo "配置: 并发处理模式"
+echo "监控地址: http://localhost:8890"
 echo "按 Ctrl+C 停止程序"
 echo ""
 
@@ -157,36 +157,36 @@ echo ""
 if [ "$1" = "--background" ] || [ "$1" = "-bg" ]; then
     # 后台运行模式
     echo "🔧 后台模式启动..."
-    nohup go run cmd/main.go -cmd=concurrent -config=config.yml \
+    nohup go run cmd/main.go -cmd=run -config=config.yml \
         >> logs/data_loader.log 2>&1 &
     
     # 保存PID
     echo $! > .data_loader_pid
     echo "✅ 程序已在后台启动 (PID: $!)"
-    echo "📊 监控面板: http://localhost:8080"
+    echo "📊 监控面板: http://localhost:8890"
     echo "📝 查看日志: tail -f logs/data_loader.log"
     echo "🛑 停止程序: ./stop.sh"
     
 elif [ "$1" = "--test" ] || [ "$1" = "-t" ]; then
     # 测试模式 - 只处理一个交易对
     echo "🧪 测试模式启动..."
-    go run cmd/main.go -cmd=concurrent -config=config.yml -symbols=BTCUSDT
+    go run cmd/main.go -cmd=run -config=config.yml -symbols=BTCUSDT
     
 else
     # 前台运行模式（默认）
     echo "🖥️  前台模式启动..."
-    echo "💡 提示: 使用 './start_optimized.sh --background' 可在后台运行"
+    echo "💡 提示: 使用 './start.sh --background' 可在后台运行"
     echo ""
     
     # 捕获中断信号以便优雅关闭
     trap 'echo ""; echo "🛑 接收到停止信号，正在优雅关闭..."; kill -TERM $PID 2>/dev/null; wait $PID 2>/dev/null; exit 0' INT TERM
     
-    go run cmd/main.go -cmd=concurrent -config=config.yml &
+    go run cmd/main.go -cmd=run -config=config.yml &
     PID=$!
     echo $PID > .data_loader_pid
     
     echo "✅ 程序已启动 (PID: $PID)"
-    echo "📊 监控面板: http://localhost:8080"
+    echo "📊 监控面板: http://localhost:8890"
     echo ""
     
     # 等待进程结束

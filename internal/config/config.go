@@ -103,17 +103,31 @@ type MaterializedViewsConfig struct {
 
 // MonitoringConfig 监控配置
 type MonitoringConfig struct {
-	Enabled                  bool          `mapstructure:"enabled"`
-	MetricsPort              int           `mapstructure:"metrics_port"`
-	HealthCheckPort          int           `mapstructure:"health_check_port"`
-	ProgressReportInterval   time.Duration `mapstructure:"progress_report_interval"`
+	Enabled                  bool                 `mapstructure:"enabled"`
+	MetricsPort              int                  `mapstructure:"metrics_port"`
+	HealthCheckPort          int                  `mapstructure:"health_check_port"`
+	ProgressReportInterval   time.Duration        `mapstructure:"progress_report_interval"`
+	WebDashboard             WebDashboardConfig   `mapstructure:"web_dashboard"`
+}
+
+// WebDashboardConfig Web监控面板配置
+type WebDashboardConfig struct {
+	Enabled               bool          `mapstructure:"enabled"`
+	Port                  int           `mapstructure:"port"`
+	AutoStart             bool          `mapstructure:"auto_start"`
+	RefreshInterval       time.Duration `mapstructure:"refresh_interval"`
+	ShowWorkerStatus      bool          `mapstructure:"show_worker_status"`
+	ShowRealtimeProgress  bool          `mapstructure:"show_realtime_progress"`
 }
 
 // SchedulerConfig 调度器配置
 type SchedulerConfig struct {
-	EndDate               string `mapstructure:"end_date"`
-	BatchDays             int    `mapstructure:"batch_days"`
-	MaxConcurrentSymbols  int    `mapstructure:"max_concurrent_symbols"`
+	EndDate               string        `mapstructure:"end_date"`
+	BatchDays             int           `mapstructure:"batch_days"`
+	MaxConcurrentSymbols  int           `mapstructure:"max_concurrent_symbols"`
+	TimelineCacheDuration time.Duration `mapstructure:"timeline_cache_duration"`
+	AutoDiscoverSymbols   bool          `mapstructure:"auto_discover_symbols"`
+	ShowStartupOverview   bool          `mapstructure:"show_startup_overview"`
 }
 
 // Load 加载配置文件
@@ -220,12 +234,20 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("monitoring.metrics_port", 8080)
 	v.SetDefault("monitoring.health_check_port", 8081)
 	v.SetDefault("monitoring.progress_report_interval", "30s")
+	v.SetDefault("monitoring.web_dashboard.enabled", true)
+	v.SetDefault("monitoring.web_dashboard.port", 8890)
+	v.SetDefault("monitoring.web_dashboard.auto_start", true)
+	v.SetDefault("monitoring.web_dashboard.refresh_interval", "10s")
+	v.SetDefault("monitoring.web_dashboard.show_worker_status", true)
+	v.SetDefault("monitoring.web_dashboard.show_realtime_progress", true)
 	
 	// 调度器默认配置
-
 	v.SetDefault("scheduler.end_date", "")
 	v.SetDefault("scheduler.batch_days", 7)
 	v.SetDefault("scheduler.max_concurrent_symbols", 5)
+	v.SetDefault("scheduler.timeline_cache_duration", "24h")
+	v.SetDefault("scheduler.auto_discover_symbols", true)
+	v.SetDefault("scheduler.show_startup_overview", true)
 }
 
 // validateConfig 验证配置

@@ -211,6 +211,11 @@ func (r *Repository) CreateTables(ctx context.Context) error {
 		return fmt.Errorf("failed to create kline table: %w", err)
 	}
 	
+	// 创建交易对信息表
+	if err := r.createSymbolInfoTable(ctx); err != nil {
+		return fmt.Errorf("failed to create symbol info table: %w", err)
+	}
+	
 	r.logger.Info().Msg("Tables created successfully")
 	return nil
 }
@@ -374,6 +379,28 @@ func (r *Repository) createKlineTable(ctx context.Context) error {
 	return r.conn.Exec(ctx, query)
 }
 
+// createSymbolInfoTable 创建交易对信息表
+func (r *Repository) createSymbolInfoTable(ctx context.Context) error {
+	query := `
+		CREATE TABLE IF NOT EXISTS symbol_infos (
+			symbol String,
+			status String,
+			base_asset String,
+			quote_asset String,
+			earliest_date Date,
+			latest_date Date,
+			total_months Int32,
+			data_status String,
+			created_at DateTime DEFAULT now(),
+			updated_at DateTime DEFAULT now()
+		) ENGINE = MergeTree()
+		ORDER BY symbol
+		SETTINGS index_granularity = 8192
+	`
+	
+	return r.conn.Exec(ctx, query)
+}
+
 // createMaterializedView 创建物化视图
 func (r *Repository) createMaterializedView(ctx context.Context, interval string) error {
 	tableName := fmt.Sprintf("klines_%s", interval)
@@ -450,4 +477,144 @@ func (r *Repository) getIntervalMinutes(interval string) int {
 	default:
 		return 1
 	}
+}
+
+// SaveSymbolInfo 保存交易对信息
+func (r *Repository) SaveSymbolInfo(ctx context.Context, symbolInfo *domain.SymbolInfo) error {
+	query := `
+		INSERT INTO symbol_infos 
+		(symbol, status, base_asset, quote_asset, earliest_date, latest_date, total_months, data_status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, now(), now())
+	`
+	
+	// 提取基础资产和报价资产
+	baseAsset := symbolInfo.BaseAsset
+	quoteAsset := symbolInfo.QuoteAsset
+	if baseAsset == "" || quoteAsset == "" {
+		// 从symbol中提取，假设USDT结尾
+		if strings.HasSuffix(symbolInfo.Symbol, "USDT") {
+			baseAsset = strings.TrimSuffix(symbolInfo.Symbol, "USDT")
+			quoteAsset = "USDT"
+		} else {
+			baseAsset = symbolInfo.Symbol
+			quoteAsset = "UNKNOWN"
+		}
+	}
+	
+	return r.conn.Exec(ctx, query,
+		symbolInfo.Symbol,
+		symbolInfo.Status,
+		baseAsset,
+		quoteAsset,
+		symbolInfo.EarliestDate,
+		symbolInfo.LatestDate,
+		symbolInfo.TotalMonths,
+		symbolInfo.DataStatus,
+	)
+}
+
+// GetSymbolInfo 获取交易对信息
+func (r *Repository) GetSymbolInfo(ctx context.Context, symbol string) (*domain.SymbolInfo, error) {
+	query := `
+		SELECT symbol, status, base_asset, quote_asset, earliest_date, latest_date, 
+		       total_months, data_status, created_at, updated_at
+		FROM symbol_infos
+		WHERE symbol = ?
+	`
+	
+	var info domain.SymbolInfo
+	row := r.conn.QueryRow(ctx, query, symbol)
+	
+	err := row.Scan(
+		&info.Symbol,
+		&info.Status,
+		&info.BaseAsset,
+		&info.QuoteAsset,
+		&info.EarliestDate,
+		&info.LatestDate,
+		&info.TotalMonths,
+		&info.DataStatus,
+		&info.CreatedAt,
+		&info.UpdatedAt,
+	)
+	
+	if err != nil {
+		return nil, err
+	}
+	
+	return &info, nil
+}
+
+// GetAllSymbolInfos 获取所有交易对信息
+func (r *Repository) GetAllSymbolInfos(ctx context.Context) ([]*domain.SymbolInfo, error) {
+	query := `
+		SELECT symbol, status, base_asset, quote_asset, earliest_date, latest_date, 
+		       total_months, data_status, created_at, updated_at
+		FROM symbol_infos
+		ORDER BY symbol
+	`
+	
+	rows, err := r.conn.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	
+	var infos []*domain.SymbolInfo
+	for rows.Next() {
+		var info domain.SymbolInfo
+		err := rows.Scan(
+			&info.Symbol,
+			&info.Status,
+			&info.BaseAsset,
+			&info.QuoteAsset,
+			&info.EarliestDate,
+			&info.LatestDate,
+			&info.TotalMonths,
+			&info.DataStatus,
+			&info.CreatedAt,
+			&info.UpdatedAt,
+		)
+		if err != nil {
+			return nil, err
+		}
+		infos = append(infos, &info)
+	}
+	
+	return infos, rows.Err()
+}
+
+// UpdateSymbolInfo 更新交易对信息
+func (r *Repository) UpdateSymbolInfo(ctx context.Context, symbolInfo *domain.SymbolInfo) error {
+	query := `
+		ALTER TABLE symbol_infos 
+		UPDATE status = ?, base_asset = ?, quote_asset = ?, earliest_date = ?, 
+		       latest_date = ?, total_months = ?, data_status = ?, updated_at = now()
+		WHERE symbol = ?
+	`
+	
+	// 提取基础资产和报价资产
+	baseAsset := symbolInfo.BaseAsset
+	quoteAsset := symbolInfo.QuoteAsset
+	if baseAsset == "" || quoteAsset == "" {
+		// 从symbol中提取，假设USDT结尾
+		if strings.HasSuffix(symbolInfo.Symbol, "USDT") {
+			baseAsset = strings.TrimSuffix(symbolInfo.Symbol, "USDT")
+			quoteAsset = "USDT"
+		} else {
+			baseAsset = symbolInfo.Symbol
+			quoteAsset = "UNKNOWN"
+		}
+	}
+	
+	return r.conn.Exec(ctx, query,
+		symbolInfo.Status,
+		baseAsset,
+		quoteAsset,
+		symbolInfo.EarliestDate,
+		symbolInfo.LatestDate,
+		symbolInfo.TotalMonths,
+		symbolInfo.DataStatus,
+		symbolInfo.Symbol,
+	)
 }

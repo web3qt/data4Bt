@@ -13,6 +13,14 @@ import (
 	"binance-data-loader/internal/logger"
 )
 
+// min 返回两个整数中的较小值
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // Scheduler 调度器
 type Scheduler struct {
 	config           config.SchedulerConfig
@@ -113,6 +121,62 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	s.logger.Info().
 		Dur("total_duration", time.Since(start)).
 		Msg("Scheduler completed successfully")
+
+	return nil
+}
+
+// RunWithSymbols 运行调度器，使用预提供的符号列表
+func (s *Scheduler) RunWithSymbols(ctx context.Context, symbols []string, endDate time.Time) error {
+	s.logger.Info().
+		Str("end_date", endDate.Format("2006-01-02")).
+		Int("batch_days", s.config.BatchDays).
+		Int("concurrent_symbols", s.config.MaxConcurrentSymbols).
+		Int("symbol_count", len(symbols)).
+		Msg("Starting scheduler with provided symbols")
+
+	start := time.Now()
+	defer func() {
+		logger.LogPerformance("scheduler", "run_with_symbols", time.Since(start), map[string]interface{}{
+			"end_date": endDate.Format("2006-01-02"),
+			"symbol_count": len(symbols),
+		})
+	}()
+
+	s.logger.Info().
+		Int("symbol_count", len(symbols)).
+		Strs("symbols", symbols[:min(len(symbols), 10)]). // 只显示前10个
+		Msg("Using provided symbols")
+
+	// 生成下载任务
+	tasks, err := s.generateTasksWithEndDate(ctx, symbols, endDate)
+	if err != nil {
+		return fmt.Errorf("failed to generate tasks: %w", err)
+	}
+
+	s.logger.Info().
+		Int("task_count", len(tasks)).
+		Msg("Generated download tasks")
+
+	// 启动进度报告器
+	if s.progressReporter != nil {
+		if err := s.progressReporter.Start(len(tasks)); err != nil {
+			s.logger.Warn().Err(err).Msg("Failed to start progress reporter")
+		}
+	}
+
+	// 按批次处理任务
+	if err := s.processTasks(ctx, tasks); err != nil {
+		return fmt.Errorf("failed to process tasks: %w", err)
+	}
+
+	// 创建物化视图
+	if err := s.createMaterializedViews(ctx); err != nil {
+		s.logger.Warn().Err(err).Msg("Failed to create materialized views")
+	}
+
+	s.logger.Info().
+		Dur("total_duration", time.Since(start)).
+		Msg("Scheduler with provided symbols completed successfully")
 
 	return nil
 }
@@ -744,12 +808,4 @@ func (s *Scheduler) Stop(ctx context.Context) error {
 
 	s.logger.Info().Msg("Scheduler stopped")
 	return nil
-}
-
-// min 返回两个整数中的较小值
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

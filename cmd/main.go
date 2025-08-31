@@ -22,6 +22,7 @@ import (
 	"binance-data-loader/pkg/monitor"
 	"binance-data-loader/pkg/parser"
 	"binance-data-loader/pkg/scheduler"
+	"binance-data-loader/pkg/webmonitor"
 )
 
 /*
@@ -37,14 +38,13 @@ import (
 
 var (
 	configFile = flag.String("config", "config.yml", "Configuration file path")
-	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, status, discover, concurrent, update-latest, range-query")
+	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, status, discover, update-latest, range-query, list-symbols")
 	symbols    = flag.String("symbols", "", "Comma-separated list of symbols to process (optional)")
 	endDate    = flag.String("end", "", "End date (YYYY-MM-DD)")
 	output     = flag.String("output", "", "Output file path for range-query results (optional)")
 	verbose    = flag.Bool("verbose", false, "Enable verbose logging")
 	version    = flag.Bool("version", false, "Show version information")
 	detailed   = flag.Bool("detailed", false, "Show detailed status information")
-	concurrent = flag.Bool("concurrent", false, "Enable concurrent mode")
 )
 
 const (
@@ -111,13 +111,7 @@ func main() {
 func executeCommand(ctx context.Context, cfg *config.Config, cmd string) error {
 	switch cmd {
 	case "run":
-		if *concurrent {
-			return runConcurrentDataLoader(ctx, cfg)
-		} else {
-			return runDataLoader(ctx, cfg)
-		}
-	case "concurrent":
-		return runConcurrentDataLoader(ctx, cfg)
+		return runDataLoader(ctx, cfg)
 	case "update-latest":
 		return updateToLatest(ctx, cfg)
 	case "validate":
@@ -132,6 +126,8 @@ func executeCommand(ctx context.Context, cfg *config.Config, cmd string) error {
 		return discoverSymbols(ctx, cfg)
 	case "range-query":
 		return queryDataRanges(ctx, cfg)
+	case "list-symbols":
+		return listSymbols(ctx, cfg)
 	default:
 		return fmt.Errorf("unknown command: %s", cmd)
 	}
@@ -139,55 +135,6 @@ func executeCommand(ctx context.Context, cfg *config.Config, cmd string) error {
 
 func runDataLoader(ctx context.Context, cfg *config.Config) error {
 	log := logger.GetLogger("data_loader")
-	log.Info().Msg("Starting data loader")
-
-	// 初始化组件
-	components, err := initializeComponents(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to initialize components: %w", err)
-	}
-	defer components.cleanup()
-
-	// 初始化数据库表
-	if err := components.repository.CreateTables(ctx); err != nil {
-		return fmt.Errorf("failed to create tables: %w", err)
-	}
-
-	// 解析日期参数
-	endDateTime, err := parseDateRange(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to parse date range: %w", err)
-	}
-
-	// 更新调度器配置
-	cfg.Scheduler.EndDate = endDateTime.Format("2006-01-02")
-
-	// 创建调度器
-	scheduler := scheduler.NewScheduler(
-		cfg.Scheduler,
-		components.downloader,
-		components.importer,
-		components.stateManager,
-		components.progressReporter,
-		components.repository,
-	)
-
-	// 运行调度器
-	if err := scheduler.Run(ctx); err != nil {
-		return fmt.Errorf("scheduler execution failed: %w", err)
-	}
-
-	// 停止调度器
-	if err := scheduler.Stop(ctx); err != nil {
-		log.Warn().Err(err).Msg("Failed to stop scheduler gracefully")
-	}
-
-	log.Info().Msg("Data loader completed successfully")
-	return nil
-}
-
-func runConcurrentDataLoader(ctx context.Context, cfg *config.Config) error {
-	log := logger.GetLogger("concurrent_data_loader")
 	log.Info().Msg("Starting concurrent data loader")
 
 	// 初始化组件
@@ -211,6 +158,24 @@ func runConcurrentDataLoader(ctx context.Context, cfg *config.Config) error {
 	// 更新调度器配置
 	cfg.Scheduler.EndDate = endDateTime.Format("2006-01-02")
 
+	// 获取符号列表和时间线
+	symbols, timelines, err := getSymbolList(ctx, components.downloader, components.stateManager, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to get symbols and timelines: %w", err)
+	}
+
+	// 启动Web监控服务
+	if components.webMonitor != nil && cfg.Monitoring.WebDashboard.AutoStart {
+		if err := components.webMonitor.Start(ctx); err != nil {
+			log.Warn().Err(err).Msg("Failed to start web monitor")
+		}
+	}
+
+	// 显示启动概览
+	if cfg.Scheduler.ShowStartupOverview {
+		showStartupOverview(symbols, timelines)
+	}
+
 	// 创建调度器
 	scheduler := scheduler.NewScheduler(
 		cfg.Scheduler,
@@ -221,8 +186,9 @@ func runConcurrentDataLoader(ctx context.Context, cfg *config.Config) error {
 		components.repository,
 	)
 
-	// 运行并发调度器
-	if err := scheduler.RunConcurrent(ctx); err != nil {
+	// 运行并发调度器（如果有RunConcurrent方法）
+	// 这里我们使用RunWithSymbols方法来保持一致
+	if err := scheduler.RunWithSymbols(ctx, symbols, endDateTime); err != nil {
 		return fmt.Errorf("concurrent scheduler execution failed: %w", err)
 	}
 
@@ -234,6 +200,7 @@ func runConcurrentDataLoader(ctx context.Context, cfg *config.Config) error {
 	log.Info().Msg("Concurrent data loader completed successfully")
 	return nil
 }
+
 
 func updateToLatest(ctx context.Context, cfg *config.Config) error {
 	log := logger.GetLogger("update_to_latest")
@@ -293,7 +260,7 @@ func validateData(ctx context.Context, cfg *config.Config) error {
 	}
 
 	// 获取要验证的交易对
-	symbolList, err := getSymbolList(ctx, components.downloader)
+	symbolList, _, err := getSymbolList(ctx, components.downloader, components.stateManager, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to get symbol list: %w", err)
 	}
@@ -368,6 +335,7 @@ type components struct {
 	stateManager     *state.FileStateManager
 	progressReporter *monitor.ProgressReporter
 	importer         *importer.Importer
+	webMonitor       *webmonitor.WebMonitor
 }
 
 func (c *components) cleanup() {
@@ -376,6 +344,11 @@ func (c *components) cleanup() {
 	}
 	if c.importer != nil {
 		c.importer.Close()
+	}
+	if c.webMonitor != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		c.webMonitor.Stop(ctx)
 	}
 }
 
@@ -414,6 +387,16 @@ func initializeComponents(cfg *config.Config) (*components, error) {
 		progressReporter,
 	)
 
+	// 创建Web监控器
+	var webMon *webmonitor.WebMonitor
+	if cfg.Monitoring.WebDashboard.Enabled {
+		var err error
+		webMon, err = webmonitor.NewWebMonitor(cfg.Monitoring.WebDashboard, cfg.Database.ClickHouse, stateManager)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create web monitor: %w", err)
+		}
+	}
+
 	return &components{
 		downloader:       downloader,
 		parser:           parser,
@@ -421,6 +404,7 @@ func initializeComponents(cfg *config.Config) (*components, error) {
 		stateManager:     stateManager,
 		progressReporter: progressReporter,
 		importer:         importer,
+		webMonitor:       webMon,
 	}, nil
 }
 
@@ -457,14 +441,202 @@ func parseDateRange(cfg *config.Config) (time.Time, error) {
 	return endDateTime, nil
 }
 
-func getSymbolList(ctx context.Context, downloader *binance.BinanceDownloader) ([]string, error) {
+func getSymbolList(ctx context.Context, downloader *binance.BinanceDownloader, stateManager *state.FileStateManager, cfg *config.Config) ([]string, []domain.SymbolTimeline, error) {
+	log := logger.GetLogger("symbol_list")
+	
 	if *symbols != "" {
 		// 使用命令行指定的交易对
-		return strings.Split(*symbols, ","), nil
+		symbolList := strings.Split(*symbols, ",")
+		var timelines []domain.SymbolTimeline
+		
+		// 为指定的交易对获取或创建时间线
+		for _, symbol := range symbolList {
+			symbol = strings.TrimSpace(strings.ToUpper(symbol))
+			timeline, err := getOrCreateTimeline(ctx, symbol, downloader, stateManager, cfg)
+			if err != nil {
+				log.Warn().Str("symbol", symbol).Err(err).Msg("Failed to get timeline for specified symbol")
+				continue
+			}
+			timelines = append(timelines, *timeline)
+		}
+		
+		return symbolList, timelines, nil
 	}
 
-	// 从下载器获取所有可用的交易对
-	return downloader.GetSymbols(ctx)
+	// 如果启用了自动发现，优先从本地缓存获取
+	if cfg.Scheduler.AutoDiscoverSymbols {
+		existingTimelines, err := stateManager.GetAllTimelines()
+		if err == nil && len(existingTimelines) > 0 {
+			// 检查缓存是否仍然有效
+			cacheValid := true
+			var timelineList []domain.SymbolTimeline
+			
+			for _, timeline := range existingTimelines {
+				if time.Since(timeline.LastUpdated) > cfg.Scheduler.TimelineCacheDuration {
+					cacheValid = false
+					break
+				}
+				timelineList = append(timelineList, *timeline)
+			}
+			
+			if cacheValid {
+				symbols := make([]string, 0, len(existingTimelines))
+				for symbol := range existingTimelines {
+					symbols = append(symbols, symbol)
+				}
+				log.Info().
+					Int("cached_symbols", len(symbols)).
+					Dur("cache_age", time.Since(timelineList[0].LastUpdated)).
+					Msg("Using cached symbol list and timelines")
+				
+				return symbols, timelineList, nil
+			}
+		}
+	}
+
+	// 缓存不存在或已过期，从币安获取新的交易对列表
+	log.Info().Msg("Fetching fresh symbol list from Binance...")
+	symbols, err := downloader.GetSymbols(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get symbols from Binance: %w", err)
+	}
+
+	// 获取每个交易对的时间线并缓存
+	var timelines []domain.SymbolTimeline
+	for _, symbol := range symbols {
+		timeline, err := getOrCreateTimeline(ctx, symbol, downloader, stateManager, cfg)
+		if err != nil {
+			log.Warn().Str("symbol", symbol).Err(err).Msg("Failed to get timeline")
+			continue
+		}
+		timelines = append(timelines, *timeline)
+	}
+
+	log.Info().
+		Int("fresh_symbols", len(symbols)).
+		Int("timelines_fetched", len(timelines)).
+		Msg("Fetched fresh symbol list and timelines from Binance")
+
+	return symbols, timelines, nil
+}
+
+// getOrCreateTimeline 获取或创建交易对的时间线
+func getOrCreateTimeline(ctx context.Context, symbol string, downloader *binance.BinanceDownloader, stateManager *state.FileStateManager, cfg *config.Config) (*domain.SymbolTimeline, error) {
+	// 先尝试从本地获取
+	if timeline, err := stateManager.GetTimeline(symbol); err == nil && timeline != nil {
+		// 检查时间线是否需要更新
+		if time.Since(timeline.LastUpdated) <= cfg.Scheduler.TimelineCacheDuration {
+			return timeline, nil
+		}
+	}
+
+	// 从币安获取最新时间线
+	timeline, err := downloader.GetSymbolTimeline(ctx, symbol)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get timeline for %s: %w", symbol, err)
+	}
+
+	// 保存到状态管理器
+	if err := stateManager.SaveTimeline(timeline); err != nil {
+		// 不要因为保存失败而终止，只记录警告
+		timelineLog := logger.GetLogger("timeline")
+		timelineLog.Warn().
+			Str("symbol", symbol).
+			Err(err).
+			Msg("Failed to save timeline to state manager")
+	}
+
+	return timeline, nil
+}
+
+// showStartupOverview 显示启动概览信息
+func showStartupOverview(symbols []string, timelines []domain.SymbolTimeline) {
+	fmt.Printf("\n")
+	fmt.Printf("🚀 === Binance 数据加载器启动概览 ===\n")
+	fmt.Printf("\n")
+	
+	if len(timelines) == 0 {
+		fmt.Printf("📋 将处理的交易对: %d 个\n", len(symbols))
+		for i, symbol := range symbols {
+			if i < 10 { // 只显示前10个
+				fmt.Printf("   • %s\n", symbol)
+			} else if i == 10 {
+				fmt.Printf("   • ... 还有 %d 个交易对\n", len(symbols)-10)
+				break
+			}
+		}
+		fmt.Printf("\n")
+		return
+	}
+
+	// 按总月份数排序时间线
+	sort.Slice(timelines, func(i, j int) bool {
+		return timelines[i].TotalMonths > timelines[j].TotalMonths
+	})
+
+	// 统计信息
+	totalMonths := 0
+	completedMonths := 0
+	earliestDate := time.Now()
+	latestDate := time.Time{}
+	
+	for _, timeline := range timelines {
+		totalMonths += timeline.TotalMonths
+		completedMonths += timeline.ImportedMonthsCount
+		if timeline.HistoricalStartDate.Before(earliestDate) {
+			earliestDate = timeline.HistoricalStartDate
+		}
+		if timeline.LatestAvailableDate.After(latestDate) {
+			latestDate = timeline.LatestAvailableDate
+		}
+	}
+
+	fmt.Printf("📊 数据概览:\n")
+	fmt.Printf("   • 交易对数量: %d\n", len(timelines))
+	fmt.Printf("   • 总数据月份: %d 个月\n", totalMonths)
+	fmt.Printf("   • 已完成月份: %d 个月 (%.1f%%)\n", completedMonths, float64(completedMonths)*100/float64(totalMonths))
+	fmt.Printf("   • 时间范围: %s 至 %s\n", earliestDate.Format("2006-01"), latestDate.Format("2006-01"))
+	fmt.Printf("\n")
+
+	fmt.Printf("🏆 主要交易对 (按数据量排序):\n")
+	displayCount := min(len(timelines), 10)
+	for i := 0; i < displayCount; i++ {
+		timeline := timelines[i]
+		progress := float64(timeline.ImportedMonthsCount) * 100 / float64(timeline.TotalMonths)
+		progressBar := generateProgressBar(progress, 20)
+		
+		fmt.Printf("   %-12s %s %3.0f%% (%2d/%2d月) %s-%s\n",
+			timeline.Symbol,
+			progressBar,
+			progress,
+			timeline.ImportedMonthsCount,
+			timeline.TotalMonths,
+			timeline.HistoricalStartDate.Format("2006-01"),
+			timeline.LatestAvailableDate.Format("2006-01"))
+	}
+	
+	if len(timelines) > 10 {
+		fmt.Printf("   ... 还有 %d 个交易对\n", len(timelines)-10)
+	}
+	
+	fmt.Printf("\n")
+	fmt.Printf("💡 提示: 使用 'go run cmd/main.go -cmd=status -detailed' 查看详细状态\n")
+	fmt.Printf("\n")
+}
+
+// generateProgressBar 生成进度条
+func generateProgressBar(progress float64, width int) string {
+	filled := int(progress * float64(width) / 100)
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+	return fmt.Sprintf("[%s]", bar)
+}
+
+// min 返回两个整数中的较小值
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // showStatus 显示下载状态
@@ -717,11 +889,26 @@ func discoverSymbols(ctx context.Context, cfg *config.Config) error {
 
 		// 保存时间线到状态管理器
 		if err := comps.stateManager.SaveTimeline(timeline); err != nil {
-			fmt.Printf(" ⚠️  保存失败: %v\n", err)
-		} else {
-			fmt.Printf(" ✅ 完成 (%d个月)\n", timeline.TotalMonths)
+			fmt.Printf(" ⚠️  状态保存失败: %v\n", err)
 		}
-
+		
+		// 保存交易对信息到数据库
+		symbolInfo := &domain.SymbolInfo{
+			Symbol:       timeline.Symbol,
+			Status:       "TRADING",
+			EarliestDate: timeline.HistoricalStartDate,
+			LatestDate:   timeline.LatestAvailableDate,
+			TotalMonths:  int32(timeline.TotalMonths),
+			DataStatus:   "discovered",
+			CreatedAt:    time.Now(),
+			UpdatedAt:    time.Now(),
+		}
+		
+		if err := comps.repository.SaveSymbolInfo(ctx, symbolInfo); err != nil {
+			fmt.Printf(" ⚠️  数据库保存失败: %v", err)
+		}
+		
+		fmt.Printf(" ✅ 完成 (%d个月)\n", timeline.TotalMonths)
 		timelines = append(timelines, timeline)
 	}
 
@@ -969,25 +1156,73 @@ func init() {
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "\n%s - Download and process Binance K-line data\n\n", appName)
 		fmt.Fprintf(os.Stderr, "Commands:\n")
-		fmt.Fprintf(os.Stderr, "  run        - Run the data loader (default)\n")
+		fmt.Fprintf(os.Stderr, "  run        - Run the concurrent data loader (default)\n")
 		fmt.Fprintf(os.Stderr, "  validate   - Validate existing data\n")
 		fmt.Fprintf(os.Stderr, "  init-db    - Initialize database tables\n")
 		fmt.Fprintf(os.Stderr, "  create-views - Create materialized views\n")
 		fmt.Fprintf(os.Stderr, "  status     - Show download status\n")
 		fmt.Fprintf(os.Stderr, "  discover   - Discover symbol timelines\n")
+		fmt.Fprintf(os.Stderr, "  update-latest - Update to latest data\n")
 		fmt.Fprintf(os.Stderr, "  range-query - Query historical data ranges\n")
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		flag.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "Examples:\n")
-		fmt.Fprintf(os.Stderr, "  %s -cmd=run -start=2024-01-01 -end=2024-01-31\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -cmd=status -detailed\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "\nExamples:\n")
+		fmt.Fprintf(os.Stderr, "  %s                                      # Run with defaults\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=run -end=2024-01-31            # Run until specific date\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=status -detailed               # Show detailed status\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=validate -symbols=BTCUSDT,ETHUSDT\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=discover -symbols=BTCUSDT -detailed\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -cmd=range-query\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -cmd=range-query -symbols=BTCUSDT,ETHUSDT\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -cmd=range-query -symbols=BTC\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -cmd=range-query -output=ranges.txt\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -cmd=range-query -symbols=BTCUSDT -output=btc_range.txt\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -cmd=init-db\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=range-query -symbols=BTCUSDT -output=ranges.txt\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=list-symbols                   # List symbols in database\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=init-db                        # Initialize database\n", os.Args[0])
 	}
+}
+
+// listSymbols 列出数据库中的所有交易对信息
+func listSymbols(ctx context.Context, cfg *config.Config) error {
+	log := logger.GetLogger("list_symbols")
+	log.Info().Msg("Listing symbols from database")
+	
+	// 初始化组件
+	comps, err := initializeComponents(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize components: %w", err)
+	}
+	defer comps.cleanup()
+	
+	// 获取所有交易对信息
+	symbolInfos, err := comps.repository.GetAllSymbolInfos(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get symbol infos: %w", err)
+	}
+	
+	if len(symbolInfos) == 0 {
+		fmt.Println("🔍 数据库中没有找到交易对信息")
+		fmt.Println("💡 提示: 请先使用 'go run cmd/main.go -cmd=discover' 发现交易对")
+		return nil
+	}
+	
+	fmt.Println("📊 数据库中的交易对信息:")
+	fmt.Println("================================================================================")
+	fmt.Printf("%-12s %-8s %-6s %-6s %-12s %-12s %-6s %-10s\n", 
+		"交易对", "状态", "基础", "报价", "最早日期", "最新日期", "月数", "数据状态")
+	fmt.Println("--------------------------------------------------------------------------------")
+	
+	for _, info := range symbolInfos {
+		fmt.Printf("%-12s %-8s %-6s %-6s %-12s %-12s %-6d %-10s\n",
+			info.Symbol,
+			info.Status,
+			info.BaseAsset,
+			info.QuoteAsset,
+			info.EarliestDate.Format("2006-01-02"),
+			info.LatestDate.Format("2006-01-02"),
+			int(info.TotalMonths),
+			info.DataStatus,
+		)
+	}
+	
+	fmt.Println("================================================================================")
+	fmt.Printf("🎉 总计: %d 个交易对\n", len(symbolInfos))
+	
+	return nil
 }
