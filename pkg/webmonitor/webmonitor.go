@@ -124,7 +124,16 @@ func (w *WebMonitor) Stop(ctx context.Context) error {
 
 	w.logger.Info().Msg("Stopping web monitor dashboard")
 
-	if err := w.server.Shutdown(ctx); err != nil {
+	// 创建带超时的上下文用于优雅关闭
+	shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	if err := w.server.Shutdown(shutdownCtx); err != nil {
+		w.logger.Warn().Err(err).Msg("Failed to gracefully shutdown web monitor server, forcing close")
+		// 如果优雅关闭失败，强制关闭
+		if closeErr := w.server.Close(); closeErr != nil {
+			w.logger.Error().Err(closeErr).Msg("Failed to force close web monitor server")
+		}
 		return fmt.Errorf("failed to shutdown web monitor server: %w", err)
 	}
 

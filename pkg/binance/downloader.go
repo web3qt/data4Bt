@@ -41,6 +41,12 @@ func NewBinanceDownloader(cfg config.BinanceConfig, downloaderCfg config.Downloa
 		Timeout: cfg.Timeout,
 	}
 
+	// 如果没有设置超时或超时太长，设置一个合理的默认超时
+	if client.Timeout == 0 || client.Timeout > 30*time.Second {
+		client.Timeout = 30 * time.Second
+		log.Info().Dur("timeout", client.Timeout).Msg("Set HTTP client timeout for better responsiveness")
+	}
+
 	// 配置代理
 	if cfg.ProxyURL != "" {
 		proxyURL, err := url.Parse(cfg.ProxyURL)
@@ -159,7 +165,12 @@ func (d *BinanceDownloader) GetAllSymbolsFromBinance(ctx context.Context) ([]str
 				Int("attempt", attempt).
 				Err(lastErr).
 				Msg("Retrying API request")
-			time.Sleep(d.retryDelay)
+			// 等待重试延迟，响应上下文取消
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(d.retryDelay):
+			}
 		}
 
 		d.logger.Debug().
@@ -433,11 +444,15 @@ func (d *BinanceDownloader) GetAvailableDates(ctx context.Context, symbol string
 			minDate = midDate.AddDate(0, 1, 0)
 		}
 
-		// 添加小延迟
+		// 检查上下文取消，减少延迟以提高响应性
 		select {
 		case <-ctx.Done():
+			d.logger.Info().
+				Str("symbol", symbol).
+				Msg("GetAvailableDates cancelled during binary search")
 			return nil, ctx.Err()
-		case <-time.After(50 * time.Millisecond):
+		case <-time.After(10 * time.Millisecond):
+			// 继续二分查找
 		}
 	}
 
@@ -449,6 +464,15 @@ func (d *BinanceDownloader) GetAvailableDates(ctx context.Context, symbol string
 	// 生成从最早日期到当前日期的所有月份
 	var availableDates []time.Time
 	for checkDate := earliestDate; !checkDate.After(currentDate); checkDate = checkDate.AddDate(0, 1, 0) {
+		// 检查上下文是否被取消
+		select {
+		case <-ctx.Done():
+			d.logger.Info().
+				Str("symbol", symbol).
+				Msg("GetAvailableDates cancelled during date generation")
+			return nil, ctx.Err()
+		default:
+		}
 		availableDates = append(availableDates, checkDate)
 	}
 

@@ -207,9 +207,28 @@ func (s *Scheduler) generateTasksWithEndDate(ctx context.Context, symbols []stri
 	var allTasks []domain.DownloadTask
 
 	// 为每个交易对生成任务
-	for _, symbol := range symbols {
+	for i, symbol := range symbols {
+		// 检查上下文是否被取消
+		select {
+		case <-ctx.Done():
+			s.logger.Info().
+				Str("current_symbol", symbol).
+				Int("processed_symbols", i).
+				Int("total_symbols", len(symbols)).
+				Msg("Task generation cancelled")
+			return nil, ctx.Err()
+		default:
+		}
+		
 		tasks, err := s.generateTasksForSymbolWithEndDate(ctx, symbol, endDate)
 		if err != nil {
+			// 检查是否是因为上下文取消导致的错误
+			if ctx.Err() != nil {
+				s.logger.Info().
+					Str("symbol", symbol).
+					Msg("Task generation cancelled during symbol processing")
+				return nil, ctx.Err()
+			}
 			s.logger.Warn().
 				Err(err).
 				Str("symbol", symbol).
@@ -378,6 +397,18 @@ func (s *Scheduler) processTasks(ctx context.Context, tasks []domain.DownloadTas
 
 	// 串行处理每个代币
 	for i, symbol := range symbols {
+		// 首先检查上下文是否被取消
+		select {
+		case <-ctx.Done():
+			s.logger.Info().
+				Str("current_symbol", symbol).
+				Int("completed_symbols", i).
+				Int("total_symbols", len(symbols)).
+				Msg("Serial processing cancelled")
+			return ctx.Err()
+		default:
+		}
+		
 		symbolTaskList := symbolTasks[symbol]
 		
 		s.logger.Info().
@@ -391,6 +422,13 @@ func (s *Scheduler) processTasks(ctx context.Context, tasks []domain.DownloadTas
 
 		// 处理当前代币的所有任务（按时间顺序）
 		if err := s.importer.ImportData(ctx, symbolTaskList); err != nil {
+			// 检查是否是上下文取消导致的错误
+			if ctx.Err() != nil {
+				s.logger.Info().
+					Str("symbol", symbol).
+					Msg("Symbol processing cancelled due to context cancellation")
+				return ctx.Err()
+			}
 			return fmt.Errorf("failed to import data for symbol %s: %w", symbol, err)
 		}
 
@@ -402,16 +440,26 @@ func (s *Scheduler) processTasks(ctx context.Context, tasks []domain.DownloadTas
 		// 检查上下文是否被取消
 		select {
 		case <-ctx.Done():
+			s.logger.Info().
+				Str("completed_symbol", symbol).
+				Int("completed_symbols", i+1).
+				Int("total_symbols", len(symbols)).
+				Msg("Serial processing cancelled after completing symbol")
 			return ctx.Err()
 		default:
 		}
 
-		// 代币间的短暂休息
+		// 代币间的短暂休息（可被中断）- 减少休息时间以提高响应性
 		if i+1 < len(symbols) {
-			time.Sleep(2 * time.Second)
-			s.logger.Info().
-				Str("next_symbol", symbols[i+1]).
-				Msg("Moving to next symbol")
+			select {
+			case <-ctx.Done():
+				s.logger.Info().Msg("Serial processing cancelled during rest period")
+				return ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+				s.logger.Debug().
+					Str("next_symbol", symbols[i+1]).
+					Msg("Moving to next symbol")
+			}
 		}
 	}
 
@@ -539,6 +587,14 @@ func (s *Scheduler) processTasksConcurrent(ctx context.Context, tasks []domain.D
 		go func(sym string) {
 			defer wg.Done()
 			
+			// 检查上下文是否已被取消
+			select {
+			case <-ctx.Done():
+				errChan <- ctx.Err()
+				return
+			default:
+			}
+			
 			// 获取信号量
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
@@ -552,8 +608,16 @@ func (s *Scheduler) processTasksConcurrent(ctx context.Context, tasks []domain.D
 				Str("latest_month", symbolTaskList[len(symbolTaskList)-1].Date.Format("2006-01")).
 				Msg("Starting concurrent symbol processing")
 			
-			// 处理当前代币的所有任务
+			// 处理当前代币的所有任务，传递取消上下文
 			if err := s.importer.ImportData(ctx, symbolTaskList); err != nil {
+				// 检查是否是因为上下文取消导致的错误
+				if ctx.Err() != nil {
+					s.logger.Info().
+						Str("symbol", sym).
+						Msg("Symbol processing cancelled due to context cancellation")
+					errChan <- ctx.Err()
+					return
+				}
 				errChan <- fmt.Errorf("failed to import data for symbol %s: %w", sym, err)
 				return
 			}
@@ -565,18 +629,45 @@ func (s *Scheduler) processTasksConcurrent(ctx context.Context, tasks []domain.D
 		}(symbol)
 	}
 
-	// 等待所有任务完成
+	// 等待所有任务完成或上下文取消
 	go func() {
 		wg.Wait()
 		close(errChan)
 	}()
 
-	// 检查错误
-	for err := range errChan {
-		if err != nil {
-			return err
+	// 检查错误和上下文取消
+	for {
+		select {
+		case <-ctx.Done():
+			s.logger.Info().Msg("Concurrent processing cancelled, stopping remaining tasks")
+			return ctx.Err()
+		case err, ok := <-errChan:
+			if !ok {
+				// 通道已关闭，所有任务完成
+				break
+			}
+			if err != nil {
+				// 如果是上下文取消错误，直接返回
+				if err == context.Canceled || err == context.DeadlineExceeded {
+					s.logger.Info().Msg("Concurrent processing cancelled")
+					return err
+				}
+				return err
+			}
+		}
+		
+		// 检查通道是否已关闭（所有任务完成）
+		select {
+		case _, ok := <-errChan:
+			if !ok {
+				goto finished
+			}
+		default:
+			continue
 		}
 	}
+
+finished:
 
 	s.logger.Info().
 		Int("total_symbols_processed", len(symbols)).

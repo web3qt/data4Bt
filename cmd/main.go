@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -93,19 +94,59 @@ func main() {
 	// 设置信号处理
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	
+	// 用于跟踪是否已经开始关闭
+	var shutdownOnce sync.Once
+	
 	go func() {
 		sig := <-sigChan
-		log.Info().Str("signal", sig.String()).Msg("Received signal, shutting down...")
-		cancel()
+		shutdownOnce.Do(func() {
+			log.Info().
+				Str("signal", sig.String()).
+				Msg("Received shutdown signal, initiating graceful shutdown...")
+			fmt.Printf("\n🛑 收到停止信号 (%s)，正在优雅关闭系统...\n", sig.String())
+			fmt.Println("💡 请等待当前操作完成，系统将自动保存状态并退出")
+			fmt.Println("⚡ 如果系统无响应，请再按一次 Ctrl+C 强制退出")
+			cancel()
+			
+			// 设置优雅关闭超时
+			go func() {
+				time.Sleep(10 * time.Second)
+				log.Warn().Msg("Graceful shutdown timeout, forcing exit")
+				fmt.Println("\n⏰ 优雅关闭超时，强制退出！")
+				os.Exit(1)
+			}()
+		})
+		
+		// 如果再次收到信号，立即强制退出
+		sig2 := <-sigChan
+		log.Warn().
+			Str("signal", sig2.String()).
+			Msg("Received second shutdown signal, forcing immediate exit")
+		fmt.Printf("\n⚠️  收到第二次停止信号 (%s)，立即强制退出！\n", sig2.String())
+		os.Exit(1)
 	}()
 
 	// 执行命令
 	if err := executeCommand(ctx, cfg, *command); err != nil {
-		log.Error().Err(err).Str("command", *command).Msg("Command execution failed")
-		os.Exit(1)
+		// 检查是否是因为上下文取消导致的错误
+		if err == context.Canceled {
+			log.Info().Msg("Application was cancelled by user")
+			fmt.Println("✅ 系统已成功停止")
+			os.Exit(0)
+		} else if err == context.DeadlineExceeded {
+			log.Warn().Msg("Application was cancelled due to timeout")
+			fmt.Println("⏰ 系统因超时被停止")
+			os.Exit(1)
+		} else {
+			log.Error().Err(err).Str("command", *command).Msg("Command execution failed")
+			fmt.Printf("❌ 系统执行失败: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	log.Info().Msg("Application completed successfully")
+	fmt.Println("🎉 系统正常完成所有任务")
 }
 
 func executeCommand(ctx context.Context, cfg *config.Config, cmd string) error {
@@ -339,17 +380,33 @@ type components struct {
 }
 
 func (c *components) cleanup() {
-	if c.repository != nil {
-		c.repository.Close()
-	}
-	if c.importer != nil {
-		c.importer.Close()
-	}
+	log := logger.GetLogger("cleanup")
+	log.Info().Msg("Starting component cleanup")
+	
+	// 停止Web监控器（优先级最高，需要最长时间）
 	if c.webMonitor != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		c.webMonitor.Stop(ctx)
+		if err := c.webMonitor.Stop(ctx); err != nil {
+			log.Warn().Err(err).Msg("Failed to stop web monitor gracefully")
+		}
 	}
+	
+	// 关闭导入器
+	if c.importer != nil {
+		if err := c.importer.Close(); err != nil {
+			log.Warn().Err(err).Msg("Failed to close importer")
+		}
+	}
+	
+	// 关闭数据库连接（最后关闭）
+	if c.repository != nil {
+		if err := c.repository.Close(); err != nil {
+			log.Warn().Err(err).Msg("Failed to close repository")
+		}
+	}
+	
+	log.Info().Msg("Component cleanup completed")
 }
 
 func initializeComponents(cfg *config.Config) (*components, error) {

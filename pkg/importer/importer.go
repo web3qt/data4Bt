@@ -158,6 +158,13 @@ func (i *Importer) worker(ctx context.Context, taskChan <-chan domain.DownloadTa
 
 // processTask 处理单个任务
 func (i *Importer) processTask(ctx context.Context, task domain.DownloadTask) error {
+	// 立即检查上下文是否已取消
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	// 获取信号量
 	if err := i.semaphore.Acquire(ctx, 1); err != nil {
 		return err
@@ -191,6 +198,13 @@ func (i *Importer) processTask(ctx context.Context, task domain.DownloadTask) er
 				Msg("Date already processed, skipping")
 			return nil
 		}
+
+	// 再次检查上下文在下载前
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 
 	// 下载数据
 	data, err := i.downloader.Fetch(ctx, task)
