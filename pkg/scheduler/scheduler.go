@@ -429,7 +429,23 @@ func (s *Scheduler) processTasks(ctx context.Context, tasks []domain.DownloadTas
 					Msg("Symbol processing cancelled due to context cancellation")
 				return ctx.Err()
 			}
-			return fmt.Errorf("failed to import data for symbol %s: %w", symbol, err)
+			
+			// 检查是否为可恢复错误
+			if domain.IsRecoverableError(err) {
+				s.logger.Warn().
+					Err(err).
+					Str("symbol", symbol).
+					Msg("Symbol processing failed with recoverable error, skipping and continuing with next symbol")
+				continue
+			}
+			
+			// 对于非致命错误，记录错误但继续处理下一个symbol
+			s.logger.Error().
+				Err(err).
+				Str("symbol", symbol).
+				Int("remaining_symbols", len(symbols)-i-1).
+				Msg("Symbol processing failed, continuing with next symbol")
+			continue
 		}
 
 		s.logger.Info().
@@ -618,7 +634,23 @@ func (s *Scheduler) processTasksConcurrent(ctx context.Context, tasks []domain.D
 					errChan <- ctx.Err()
 					return
 				}
-				errChan <- fmt.Errorf("failed to import data for symbol %s: %w", sym, err)
+				
+				// 检查是否为可恢复错误
+				if domain.IsRecoverableError(err) {
+					s.logger.Warn().
+						Err(err).
+						Str("symbol", sym).
+						Msg("Concurrent symbol processing failed with recoverable error, treating as success")
+					errChan <- nil // 可恢复错误视为成功
+					return
+				}
+				
+				// 对于非致命错误，在并发模式下也记录但不阻止其他symbol
+				s.logger.Error().
+					Err(err).
+					Str("symbol", sym).
+					Msg("Concurrent symbol processing failed, but allowing other symbols to continue")
+				errChan <- nil // 在并发模式下，不让单个symbol的失败影响整体
 				return
 			}
 			

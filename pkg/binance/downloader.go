@@ -108,7 +108,7 @@ func (d *BinanceDownloader) Fetch(ctx context.Context, task domain.DownloadTask)
 			}
 		}
 
-		data, err := d.downloadAndExtract(ctx, url)
+		data, err := d.downloadAndExtract(ctx, url, task.Symbol, task.Date)
 		if err == nil {
 			d.logger.Debug().
 				Str("symbol", task.Symbol).
@@ -254,7 +254,7 @@ func (d *BinanceDownloader) ValidateURL(ctx context.Context, url string) error {
 }
 
 // downloadAndExtract 下载并解压ZIP文件
-func (d *BinanceDownloader) downloadAndExtract(ctx context.Context, url string) ([]byte, error) {
+func (d *BinanceDownloader) downloadAndExtract(ctx context.Context, url string, symbol string, date time.Time) ([]byte, error) {
 	// 创建HTTP请求
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -272,6 +272,12 @@ func (d *BinanceDownloader) downloadAndExtract(ctx context.Context, url string) 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			// 404表示数据不存在，这是正常情况（某些月份的数据可能不存在）
+			// 返回特殊的错误类型，上层可以优雅地跳过
+			return nil, domain.NewDataNotAvailableError(symbol, date, 
+				fmt.Sprintf("data not found on server (HTTP %d)", resp.StatusCode))
+		}
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 

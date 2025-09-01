@@ -99,11 +99,23 @@ func (i *Importer) ImportData(ctx context.Context, tasks []domain.DownloadTask) 
 			Msg("Processing monthly task")
 
 		if err := i.processTask(ctx, task); err != nil {
+			// 检查是否为可恢复错误（如数据不存在）
+			if domain.IsRecoverableError(err) {
+				i.logger.Warn().
+					Err(err).
+					Str("symbol", task.Symbol).
+					Str("month", task.Date.Format("2006-01")).
+					Msg("Task failed with recoverable error, skipping and continuing")
+				// 可恢复错误不计入成功数，但也不停止整个流程
+				continue
+			}
+			
+			// 真正的错误，停止导入
 			i.logger.Error().
 				Err(err).
 				Str("symbol", task.Symbol).
 				Str("month", task.Date.Format("2006-01")).
-				Msg("Failed to process monthly task, stopping import")
+				Msg("Failed to process monthly task with unrecoverable error, stopping import")
 			return fmt.Errorf("failed to process task for %s %s: %w", task.Symbol, task.Date.Format("2006-01"), err)
 		}
 
@@ -209,6 +221,15 @@ func (i *Importer) processTask(ctx context.Context, task domain.DownloadTask) er
 	// 下载数据
 	data, err := i.downloader.Fetch(ctx, task)
 	if err != nil {
+		// 检查是否为数据不存在错误（可跳过）
+		if domain.IsDataNotAvailableError(err) {
+			i.logger.Warn().
+				Str("symbol", task.Symbol).
+				Str("date", task.Date.Format("2006-01-02")).
+				Err(err).
+				Msg("Data not available, skipping task")
+			return nil // 返回nil表示跳过，不是真正的错误
+		}
 		return fmt.Errorf("failed to download data: %w", err)
 	}
 
@@ -613,12 +634,24 @@ func (i *Importer) processConcurrentTask(ctx context.Context, workerID int, conc
 			Msg("Processing monthly task in worker")
 
 		if err := i.processTask(ctx, task); err != nil {
+			// 检查是否为可恢复错误
+			if domain.IsRecoverableError(err) {
+				i.logger.Warn().
+					Err(err).
+					Int("worker_id", workerID).
+					Str("symbol", task.Symbol).
+					Str("month", task.Date.Format("2006-01")).
+					Msg("Task failed with recoverable error in worker, skipping")
+				// 对于可恢复错误，不增加失败计数，继续处理下一个任务
+				continue
+			}
+			
 			i.logger.Error().
 				Err(err).
 				Int("worker_id", workerID).
 				Str("symbol", task.Symbol).
 				Str("month", task.Date.Format("2006-01")).
-				Msg("Failed to process monthly task in worker")
+				Msg("Failed to process monthly task with unrecoverable error in worker")
 
 			// 更新失败状态
 			if err := i.stateManager.UpdateSymbolProgress(concurrentTask.Symbol, &domain.SymbolProgressInfo{
