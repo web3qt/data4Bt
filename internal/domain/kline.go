@@ -76,6 +76,28 @@ type ValidationResult struct {
 	Warnings     []string `json:"warnings"`
 }
 
+// DataCompletenessStats 数据完整性统计
+type DataCompletenessStats struct {
+	Symbol            string            `json:"symbol"`
+	TotalExpectedRecords int64          `json:"total_expected_records"`
+	TotalActualRecords   int64          `json:"total_actual_records"`
+	CompletenessRatio    float64        `json:"completeness_ratio"`
+	MonthlyStats      map[string]*MonthlyStats `json:"monthly_stats"`
+	FirstRecord       time.Time         `json:"first_record"`
+	LastRecord        time.Time         `json:"last_record"`
+}
+
+// MonthlyStats 月度统计信息
+type MonthlyStats struct {
+	Month           string    `json:"month"`
+	ExpectedRecords int64     `json:"expected_records"`
+	ActualRecords   int64     `json:"actual_records"`
+	CompletenessRatio float64 `json:"completeness_ratio"`
+	FirstRecord     time.Time `json:"first_record"`
+	LastRecord      time.Time `json:"last_record"`
+	HasData         bool      `json:"has_data"`
+}
+
 // ProgressReport 表示进度报告
 type ProgressReport struct {
 	TotalTasks       int                    `json:"total_tasks"`
@@ -178,6 +200,15 @@ type KLineRepository interface {
 	
 	// UpdateSymbolInfo 更新交易对信息
 	UpdateSymbolInfo(ctx context.Context, symbolInfo *SymbolInfo) error
+	
+	// GetMonthlyDataStats 获取月度数据统计
+	GetMonthlyDataStats(ctx context.Context, symbol string, month time.Time) (int64, time.Time, time.Time, error)
+	
+	// CheckMonthlyDataExistence 检查月度数据存在性
+	CheckMonthlyDataExistence(ctx context.Context, symbol string, months []string) (map[string]bool, error)
+	
+	// GetDataCompletenessForSymbol 获取交易对数据完整性统计
+	GetDataCompletenessForSymbol(ctx context.Context, symbol string, startMonth, endMonth string) (*DataCompletenessStats, error)
 	
 	// Close 关闭连接
 	Close() error

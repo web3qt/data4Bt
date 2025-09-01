@@ -545,6 +545,244 @@ func (r *Repository) GetSymbolInfo(ctx context.Context, symbol string) (*domain.
 	return &info, nil
 }
 
+// GetMonthlyDataStats 获取月度数据统计
+func (r *Repository) GetMonthlyDataStats(ctx context.Context, symbol string, month time.Time) (int64, time.Time, time.Time, error) {
+	// 计算月份的开始和结束时间
+	startOfMonth := time.Date(month.Year(), month.Month(), 1, 0, 0, 0, 0, time.UTC)
+	endOfMonth := startOfMonth.AddDate(0, 1, 0).Add(-time.Second)
+	
+	// 查询该月份的数据统计
+	query := `
+		SELECT 
+			count(*) as total_records,
+			min(open_time) as first_record,
+			max(open_time) as last_record
+		FROM klines_1m 
+		WHERE symbol = ? 
+		AND open_time >= ? 
+		AND open_time <= ?
+	`
+	
+	var totalRecords int64
+	var firstRecord, lastRecord time.Time
+	
+	row := r.conn.QueryRow(ctx, query, symbol, startOfMonth, endOfMonth)
+	err := row.Scan(&totalRecords, &firstRecord, &lastRecord)
+	if err != nil {
+		return 0, time.Time{}, time.Time{}, fmt.Errorf("failed to get monthly data stats: %w", err)
+	}
+	
+	return totalRecords, firstRecord, lastRecord, nil
+}
+
+// CheckMonthlyDataExistence 检查月度数据存在性
+func (r *Repository) CheckMonthlyDataExistence(ctx context.Context, symbol string, months []string) (map[string]bool, error) {
+	if len(months) == 0 {
+		return make(map[string]bool), nil
+	}
+	
+	// 构建查询条件
+	var conditions []string
+	var args []interface{}
+	
+	args = append(args, symbol)
+	
+	for _, month := range months {
+		monthTime, err := time.Parse("2006-01", month)
+		if err != nil {
+			continue
+		}
+		
+		startOfMonth := monthTime
+		endOfMonth := startOfMonth.AddDate(0, 1, 0).Add(-time.Second)
+		
+		conditions = append(conditions, "(open_time >= ? AND open_time <= ?)")
+		args = append(args, startOfMonth, endOfMonth)
+	}
+	
+	if len(conditions) == 0 {
+		return make(map[string]bool), nil
+	}
+	
+	query := fmt.Sprintf(`
+		SELECT 
+			formatDateTime(toStartOfMonth(open_time), '%%Y-%%m') as month,
+			count(*) > 0 as has_data
+		FROM klines_1m 
+		WHERE symbol = ? 
+		AND (%s)
+		GROUP BY toStartOfMonth(open_time)
+		ORDER BY month
+	`, strings.Join(conditions, " OR "))
+	
+	rows, err := r.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check monthly data existence: %w", err)
+	}
+	defer rows.Close()
+	
+	result := make(map[string]bool)
+	
+	// 初始化所有月份为false
+	for _, month := range months {
+		result[month] = false
+	}
+	
+	// 设置有数据的月份为true
+	for rows.Next() {
+		var month string
+		var hasData bool
+		
+		if err := rows.Scan(&month, &hasData); err != nil {
+			return nil, fmt.Errorf("failed to scan month existence: %w", err)
+		}
+		
+		result[month] = hasData
+	}
+	
+	return result, rows.Err()
+}
+
+// GetDataCompletenessForSymbol 获取交易对数据完整性统计
+func (r *Repository) GetDataCompletenessForSymbol(ctx context.Context, symbol string, startMonth, endMonth string) (*domain.DataCompletenessStats, error) {
+	startTime, err := time.Parse("2006-01", startMonth)
+	if err != nil {
+		return nil, fmt.Errorf("invalid start month format: %w", err)
+	}
+	
+	endTime, err := time.Parse("2006-01", endMonth)
+	if err != nil {
+		return nil, fmt.Errorf("invalid end month format: %w", err)
+	}
+	
+	// 确保开始时间在结束时间之前
+	if startTime.After(endTime) {
+		return nil, fmt.Errorf("start month cannot be after end month")
+	}
+	
+	// 查询每月的数据统计
+	query := `
+		SELECT 
+			formatDateTime(toStartOfMonth(open_time), '%Y-%m') as month,
+			count(*) as actual_records,
+			min(open_time) as first_record,
+			max(open_time) as last_record
+		FROM klines_1m 
+		WHERE symbol = ? 
+		AND open_time >= ? 
+		AND open_time < ?
+		GROUP BY toStartOfMonth(open_time)
+		ORDER BY month
+	`
+	
+	endTimeLimit := endTime.AddDate(0, 1, 0) // 添加一个月作为上限
+	
+	rows, err := r.conn.Query(ctx, query, symbol, startTime, endTimeLimit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query data completeness: %w", err)
+	}
+	defer rows.Close()
+	
+	monthlyStats := make(map[string]*domain.MonthlyStats)
+	var totalActualRecords int64
+	var firstRecord, lastRecord time.Time
+	
+	for rows.Next() {
+		var month string
+		var actualRecords int64
+		var monthFirstRecord, monthLastRecord time.Time
+		
+		if err := rows.Scan(&month, &actualRecords, &monthFirstRecord, &monthLastRecord); err != nil {
+			return nil, fmt.Errorf("failed to scan completeness data: %w", err)
+		}
+		
+		// 计算该月的预期记录数
+		expectedRecords := r.calculateExpectedRecordsForMonth(month)
+		completenessRatio := 0.0
+		if expectedRecords > 0 {
+			completenessRatio = float64(actualRecords) / float64(expectedRecords) * 100
+		}
+		
+		monthlyStats[month] = &domain.MonthlyStats{
+			Month:           month,
+			ExpectedRecords: expectedRecords,
+			ActualRecords:   actualRecords,
+			CompletenessRatio: completenessRatio,
+			FirstRecord:     monthFirstRecord,
+			LastRecord:      monthLastRecord,
+			HasData:         actualRecords > 0,
+		}
+		
+		totalActualRecords += actualRecords
+		
+		if firstRecord.IsZero() || monthFirstRecord.Before(firstRecord) {
+			firstRecord = monthFirstRecord
+		}
+		if monthLastRecord.After(lastRecord) {
+			lastRecord = monthLastRecord
+		}
+	}
+	
+	// 计算总的预期记录数
+	var totalExpectedRecords int64
+	currentMonth := startTime
+	for currentMonth.Before(endTime) || currentMonth.Equal(endTime) {
+		monthStr := currentMonth.Format("2006-01")
+		expectedRecords := r.calculateExpectedRecordsForMonth(monthStr)
+		totalExpectedRecords += expectedRecords
+		
+		// 如果没有数据，也要添加到统计中
+		if _, exists := monthlyStats[monthStr]; !exists {
+			monthlyStats[monthStr] = &domain.MonthlyStats{
+				Month:           monthStr,
+				ExpectedRecords: expectedRecords,
+				ActualRecords:   0,
+				CompletenessRatio: 0.0,
+				HasData:         false,
+			}
+		}
+		
+		currentMonth = currentMonth.AddDate(0, 1, 0)
+	}
+	
+	// 计算整体完整性比率
+	completenessRatio := 0.0
+	if totalExpectedRecords > 0 {
+		completenessRatio = float64(totalActualRecords) / float64(totalExpectedRecords) * 100
+	}
+	
+	stats := &domain.DataCompletenessStats{
+		Symbol:               symbol,
+		TotalExpectedRecords: totalExpectedRecords,
+		TotalActualRecords:   totalActualRecords,
+		CompletenessRatio:    completenessRatio,
+		MonthlyStats:         monthlyStats,
+		FirstRecord:          firstRecord,
+		LastRecord:           lastRecord,
+	}
+	
+	return stats, rows.Err()
+}
+
+// calculateExpectedRecordsForMonth 计算指定月份的预期记录数
+func (r *Repository) calculateExpectedRecordsForMonth(month string) int64 {
+	monthTime, err := time.Parse("2006-01", month)
+	if err != nil {
+		return 40320 // 默认值：28天 * 1440分钟
+	}
+	
+	// 计算该月的天数
+	year := monthTime.Year()
+	monthNum := monthTime.Month()
+	
+	// 获取下一个月的第一天，然后减去一天得到当前月的最后一天
+	nextMonth := time.Date(year, monthNum+1, 1, 0, 0, 0, 0, time.UTC)
+	lastDay := nextMonth.Add(-24 * time.Hour).Day()
+	
+	// 每天1440分钟 (24 * 60)
+	return int64(lastDay * 1440)
+}
+
 // GetAllSymbolInfos 获取所有交易对信息
 func (r *Repository) GetAllSymbolInfos(ctx context.Context) ([]*domain.SymbolInfo, error) {
 	query := `

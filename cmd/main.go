@@ -22,6 +22,7 @@ import (
 	"binance-data-loader/pkg/importer"
 	"binance-data-loader/pkg/monitor"
 	"binance-data-loader/pkg/parser"
+	"binance-data-loader/pkg/quality"
 	"binance-data-loader/pkg/scheduler"
 	"binance-data-loader/pkg/webmonitor"
 )
@@ -39,13 +40,15 @@ import (
 
 var (
 	configFile = flag.String("config", "config.yml", "Configuration file path")
-	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, status, discover, update-latest, range-query, list-symbols, update-ranges")
+	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, status, discover, update-latest, range-query, list-symbols, update-ranges, check-quality")
 	symbols    = flag.String("symbols", "", "Comma-separated list of symbols to process (optional)")
 	endDate    = flag.String("end", "", "End date (YYYY-MM-DD)")
 	output     = flag.String("output", "", "Output file path for range-query results (optional)")
 	verbose    = flag.Bool("verbose", false, "Enable verbose logging")
 	version    = flag.Bool("version", false, "Show version information")
 	detailed   = flag.Bool("detailed", false, "Show detailed status information")
+	startDate  = flag.String("start", "", "Start date for quality check (YYYY-MM-DD)")
+	format     = flag.String("format", "console", "Output format for quality check: console, json, csv, markdown")
 )
 
 const (
@@ -171,6 +174,8 @@ func executeCommand(ctx context.Context, cfg *config.Config, cmd string) error {
 		return listSymbols(ctx, cfg)
 	case "update-ranges":
 		return updateTimelineRanges(ctx, cfg)
+	case "check-quality":
+		return checkDataQuality(ctx, cfg)
 	default:
 		return fmt.Errorf("unknown command: %s", cmd)
 	}
@@ -1237,6 +1242,10 @@ func init() {
 		fmt.Fprintf(os.Stderr, "  %s -cmd=list-symbols                   # List symbols in database\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=update-ranges                  # Update all symbol ranges\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=update-ranges -symbols=BTCUSDT # Update specific symbol ranges\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=check-quality                  # Check data quality for all symbols\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=check-quality BTCUSDT ETHUSDT  # Check specific symbols\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=check-quality -format=json     # Export quality report as JSON\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=check-quality -start=2023-01-01 -end=2023-12-31\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=init-db                        # Initialize database\n", os.Args[0])
 	}
 }
@@ -1431,5 +1440,117 @@ func updateTimelineRanges(ctx context.Context, cfg *config.Config) error {
 		Int("errors", errorCount).
 		Msg("Timeline ranges update completed")
 		
+	return nil
+}
+
+// checkDataQuality 执行数据质量检查
+func checkDataQuality(ctx context.Context, cfg *config.Config) error {
+	log := logger.GetLogger("main")
+	
+	// 初始化组件
+	comps, err := initializeComponents(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize components: %w", err)
+	}
+	defer comps.cleanup()
+	
+	// 解析命令行参数
+	symbols := []string{}
+	if len(flag.Args()) > 1 {
+		// 如果指定了交易对，使用指定的交易对
+		symbols = flag.Args()[1:]
+	}
+	
+	// 解析开始日期
+	var startDatePtr *time.Time
+	if *startDate != "" {
+		parsed, err := time.Parse("2006-01-02", *startDate)
+		if err != nil {
+			return fmt.Errorf("invalid start date format (expected YYYY-MM-DD): %w", err)
+		}
+		startDatePtr = &parsed
+	}
+	
+	// 解析结束日期
+	var endDatePtr *time.Time
+	if *endDate != "" {
+		parsed, err := time.Parse("2006-01-02", *endDate)
+		if err != nil {
+			return fmt.Errorf("invalid end date format (expected YYYY-MM-DD): %w", err)
+		}
+		endDatePtr = &parsed
+	}
+	
+	// 创建质量检查器
+	checker := quality.NewQualityChecker(comps.repository, comps.downloader)
+	reporter := quality.NewReporter()
+	
+	fmt.Println("🔍 开始数据质量检查...")
+	fmt.Println()
+	
+	// 如果没有指定交易对，获取所有交易对
+	if len(symbols) == 0 {
+		log.Info().Msg("No symbols specified, getting all available symbols")
+		allSymbols, err := checker.GetAllSymbols(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get all symbols: %w", err)
+		}
+		symbols = allSymbols
+		fmt.Printf("📊 将检查 %d 个交易对的数据质量\n\n", len(symbols))
+	} else {
+		fmt.Printf("📊 将检查指定的 %d 个交易对: %s\n\n", len(symbols), strings.Join(symbols, ", "))
+	}
+	
+	if len(symbols) == 0 {
+		fmt.Println("⚠️  没有找到可检查的交易对")
+		return nil
+	}
+	
+	// 创建质量检查请求
+	request := &quality.QualityCheckRequest{
+		Symbols:   symbols,
+		StartDate: startDatePtr,
+		EndDate:   endDatePtr,
+		CheckMode: quality.CheckModeStandard,
+	}
+	
+	// 验证请求
+	if err := checker.ValidateRequest(request); err != nil {
+		return fmt.Errorf("invalid quality check request: %w", err)
+	}
+	
+	// 执行批量质量检查
+	batchReport, err := checker.CheckBatchQuality(ctx, request)
+	if err != nil {
+		return fmt.Errorf("failed to check batch quality: %w", err)
+	}
+	
+	// 根据输出格式生成报告
+	switch *format {
+	case "json":
+		if err := reporter.WriteJSONReport(os.Stdout, batchReport); err != nil {
+			return fmt.Errorf("failed to write JSON report: %w", err)
+		}
+	case "csv":
+		csvReport := reporter.GenerateCSVReport(batchReport.Reports)
+		fmt.Print(csvReport)
+	case "markdown":
+		markdownReport := reporter.GenerateMarkdownReport(batchReport)
+		fmt.Print(markdownReport)
+	case "table":
+		tableReport := reporter.GenerateSummaryTable(batchReport.Reports)
+		fmt.Print(tableReport)
+	default: // console
+		consoleReport := reporter.GenerateBatchConsoleReport(batchReport)
+		fmt.Print(consoleReport)
+	}
+	
+	log.Info().
+		Int("total_symbols", len(symbols)).
+		Int("checked_symbols", batchReport.CheckedSymbols).
+		Float64("average_score", batchReport.Summary.AverageScore).
+		Str("format", *format).
+		Msg("Data quality check completed")
+	
 	return nil
 }
