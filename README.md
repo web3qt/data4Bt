@@ -214,7 +214,22 @@ go run cmd/main.go -cmd=create-views
 pgrep -f "go run.*cmd/main.go" | xargs kill -TERM
 ```
 
-### 10. 定期维护
+### 10. 数据验证
+
+在数据下载完成后，建议进行数据验证以确保数据质量：
+
+```bash
+# 综合数据验证（推荐）- 同时检查完整性和质量
+go run cmd/main.go -cmd=verify-data
+
+# 验证特定交易对的数据
+go run cmd/main.go -cmd=verify-data -symbols=BTCUSDT,ETHUSDT
+
+# 基础数据完整性验证
+go run cmd/main.go -cmd=validate
+```
+
+### 11. 定期维护
 
 建议定期运行以下命令来维护数据的完整性：
 
@@ -227,6 +242,9 @@ go run cmd/main.go -cmd=list-symbols
 
 # 检查下载状态和进度
 go run cmd/main.go -cmd=status -detailed
+
+# 定期进行数据质量检查
+go run cmd/main.go -cmd=verify-data
 ```
 
 ## 快速测试
@@ -256,6 +274,7 @@ go run test/btc_test_simple.go
 命令:
   run           - 运行数据加载器 (默认)
   validate      - 验证现有数据
+  verify-data   - 综合数据验证 (完整性+质量检查)
   init-db       - 初始化数据库表
   create-views  - 创建物化视图
   status        - 显示下载状态
@@ -375,6 +394,76 @@ go run cmd/main.go -cmd=validate
 go run cmd/main.go -cmd=validate -symbols=BTCUSDT,ETHUSDT
 ```
 
+**`verify-data` - 综合数据验证**
+```bash
+# 对所有交易对进行综合数据验证（完整性+质量检查）
+go run cmd/main.go -cmd=verify-data
+
+# 验证特定交易对的数据完整性和质量
+go run cmd/main.go -cmd=verify-data -symbols=BTCUSDT,ETHUSDT
+
+# 验证单个交易对
+go run cmd/main.go -cmd=verify-data -symbols=BTCUSDT
+
+# 验证指定交易对的数据（支持多个交易对）
+go run cmd/main.go -cmd=verify-data -symbols=DFUSDT,ADAUSDT,LINKUSDT
+```
+
+`verify-data` 命令功能特性：
+- **智能数据范围检测**: 自动分析数据库中的实际数据时间范围
+- **月度完整性分析**: 逐月检查数据记录的完整性和连续性
+- **数据质量评估**: 根据预期记录数计算完整性百分比
+- **异常月份识别**: 自动识别缺失或不完整的月份数据
+- **综合质量评分**: 提供基于完整性的数据质量等级评定
+- **详细统计报告**: 展示每个交易对的详细数据统计信息
+- **📄 自动报告生成**: 自动生成详细的Markdown格式验证报告文档
+
+输出示例：
+```
+=== 批量数据完整性验证报告 ===
+总交易对: 1, 已验证: 1
+验证耗时: 0.80s
+生成时间: 2025-09-02 21:27:22
+
+完整性等级分布:
+  完整 (95%+): 38 个月份
+  部分 (0-95%): 0 个月份
+  缺失 (0%): 0 个月份
+平均完整性: 100.00%
+总月份数: 38
+
+各交易对完整性状况:
+================================================================================
+🟢 DFUSDT: 100.00% (优秀 (95%+))
+  数据范围: 2021-11 - 2024-12 (38月份)
+  月度统计: 完整 38, 部分 0, 缺失 0
+
+📋 验证结论:
+✅ 数据完整性优秀，无需特别关注
+```
+
+**验证指标说明**：
+- **完整性等级**: 基于月度数据完整性的质量分级（优秀95%+, 良好80-95%, 一般60-80%, 较差<60%）
+- **月度统计**: 每月数据记录数与预期记录数的比较分析
+- **数据范围**: 交易对在数据库中的实际存储时间跨度
+- **质量评分**: 综合所有月份数据得出的整体完整性百分比
+
+**📄 报告文档**：
+验证完成后，系统会自动生成详细的Markdown报告文档：
+- **存储位置**: `reports/data-completeness-report-YYYYMMDD-HHMMSS.md`
+- **报告内容**: 执行摘要、详细统计、问题分类、修复建议、质量等级说明
+- **可视化分析**: 质量分布图、问题优先级、修复命令参考
+- **便于分享**: Markdown格式，易于查看和分享给团队成员
+
+**示例报告输出**：
+```
+📄 详细报告已生成: reports/data-completeness-report-20250902-220334.md
+📊 验证了 1 个交易对，耗时 1.3s
+🔴 0个严重问题，🟡 0个需关注，🟢 0个良好，✅ 1个优秀
+
+🎉 所有交易对数据质量良好！
+```
+
 **`update-latest` - 更新到最新数据**
 ```bash
 # 更新所有交易对到最新可用数据
@@ -383,6 +472,46 @@ go run cmd/main.go -cmd=update-latest
 # 更新特定交易对到最新数据
 go run cmd/main.go -cmd=update-latest -symbols=BTCUSDT
 ```
+
+#### 数据导出命令
+
+**`export-csv` - 导出CSV数据**
+```bash
+# 导出单个交易对的1分钟数据（默认）
+go run cmd/main.go -cmd=export-csv -symbols=BTCUSDT
+
+# 导出所有交易对的5分钟数据
+go run cmd/main.go -cmd=export-csv -interval=5m -output=all_5m.csv
+
+# 导出指定时间范围的数据
+go run cmd/main.go -cmd=export-csv -symbols=ETHUSDT -start=2023-01-01 -end=2023-12-31
+
+# 导出4小时数据到指定文件
+go run cmd/main.go -cmd=export-csv -symbols=BTCUSDT -interval=4h -output=btc_4h.csv
+```
+
+**CSV导出功能特性**：
+- **多时间间隔**: 支持 1m, 5m, 15m, 1h, 4h, 1d
+- **灵活过滤**: 支持单个交易对或全部交易对
+- **时间范围**: 可指定开始/结束日期，默认导出所有数据
+- **高性能**: 流式处理，支持大数据量导出
+- **标准格式**: ISO 8601时间戳 + 完整OHLCV数据
+- **智能命名**: 自动生成文件名或用户自定义路径
+
+**导出参数说明**：
+- `-symbols`: 交易对名称（空值=全部）
+- `-interval`: 时间间隔（默认1m）
+- `-start`: 开始日期 (YYYY-MM-DD 或 YYYY-MM)
+- `-end`: 结束日期 (YYYY-MM-DD 或 YYYY-MM)
+- `-output`: 输出文件路径（空值=自动生成）
+
+**CSV文件格式**：
+```csv
+timestamp,symbol,open,high,low,close,volume,quote_volume,trades,taker_buy_base_volume,taker_buy_quote_volume
+2021-01-01T00:00:00Z,BTCUSDT,29374.99,29440.00,29350.00,29415.26,125.45,3689438.56,1205,58.23,1713847.23
+```
+
+📋 **详细使用指南**: 查看 [CSV导出功能使用指南](./docs/CSV_EXPORT_GUIDE.md)
 
 ### 配置说明
 
@@ -605,6 +734,21 @@ MIT License
 欢迎提交Issue和Pull Request！
 
 ## 更新日志
+
+### v1.2.2
+
+- 🐛 **修复**: ClickHouse UInt64与int64类型不匹配导致的verify-data命令失败问题
+- 🔧 **优化**: GetMonthlyDataStats和GetDataCompletenessForSymbol方法的数据类型处理
+- ✅ **验证**: 修复后verify-data命令在多个交易对上运行稳定
+- 🛠️ **改进**: 保持API接口兼容性的同时解决底层类型转换问题
+
+### v1.2.1
+
+- ✨ **新增**: `verify-data` 命令 - 综合数据验证功能
+- 🔍 **增强**: 数据完整性和质量双重检查机制
+- 📊 **新增**: 详细的数据质量统计报告
+- 🛠️ **改进**: 异常数据检测和分析功能
+- 📚 **更新**: README文档，添加数据验证使用指南
 
 ### v1.2.0
 

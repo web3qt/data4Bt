@@ -17,11 +17,14 @@ import (
 	"binance-data-loader/internal/state"
 	"binance-data-loader/pkg/binance"
 	"binance-data-loader/pkg/clickhouse"
+	"binance-data-loader/pkg/csvexport"
 	"binance-data-loader/pkg/importer"
 	"binance-data-loader/pkg/monitor"
 	"binance-data-loader/pkg/parser"
 	"binance-data-loader/pkg/quality"
+	"binance-data-loader/pkg/reports"
 	"binance-data-loader/pkg/scheduler"
+	"binance-data-loader/pkg/verification"
 	"binance-data-loader/pkg/webmonitor"
 )
 
@@ -38,7 +41,7 @@ import (
 
 var (
 	configFile = flag.String("config", "config.yml", "Configuration file path")
-	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, status, discover, update-latest, range-query, list-symbols, update-ranges, check-quality")
+	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, status, discover, update-latest, range-query, list-symbols, update-ranges, check-quality, export-csv")
 	symbols    = flag.String("symbols", "", "Comma-separated list of symbols to process (optional)")
 	endDate    = flag.String("end", "", "End date (YYYY-MM-DD)")
 	output     = flag.String("output", "", "Output file path for range-query results (optional)")
@@ -47,6 +50,7 @@ var (
 	detailed   = flag.Bool("detailed", false, "Show detailed status information")
 	startDate  = flag.String("start", "", "Start date for quality check (YYYY-MM-DD)")
 	format     = flag.String("format", "console", "Output format for quality check: console, json, csv, markdown")
+	interval   = flag.String("interval", "1m", "Time interval for CSV export: 1m, 5m, 15m, 1h, 4h, 1d")
 )
 
 const (
@@ -132,6 +136,8 @@ func executeCommand(ctx context.Context, cfg *config.Config, cmd string) error {
 		return updateToLatest(ctx, cfg)
 	case "validate":
 		return validateData(ctx, cfg)
+	case "verify-data":
+		return verifyData(ctx, cfg)
 	case "init-db":
 		return initializeDatabase(ctx, cfg)
 	case "create-views":
@@ -148,6 +154,8 @@ func executeCommand(ctx context.Context, cfg *config.Config, cmd string) error {
 		return updateTimelineRanges(ctx, cfg)
 	case "check-quality":
 		return checkDataQuality(ctx, cfg)
+	case "export-csv":
+		return exportCSV(ctx, cfg)
 	default:
 		return fmt.Errorf("unknown command: %s", cmd)
 	}
@@ -1202,6 +1210,7 @@ func init() {
 		fmt.Fprintf(os.Stderr, "  range-query - Query historical data ranges\n")
 		fmt.Fprintf(os.Stderr, "  list-symbols - List symbols in database\n")
 		fmt.Fprintf(os.Stderr, "  update-ranges - Update timeline ranges for symbols\n")
+		fmt.Fprintf(os.Stderr, "  export-csv - Export K-line data to CSV file\n")
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
@@ -1218,6 +1227,9 @@ func init() {
 		fmt.Fprintf(os.Stderr, "  %s -cmd=check-quality BTCUSDT ETHUSDT  # Check specific symbols\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=check-quality -format=json     # Export quality report as JSON\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=check-quality -start=2023-01-01 -end=2023-12-31\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=export-csv -symbols=BTCUSDT -interval=1m # Export BTCUSDT 1m data\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=export-csv -interval=5m -output=data.csv # Export all symbols 5m data\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=export-csv -symbols=ETHUSDT -start=2023-01-01 -end=2023-12-31\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=init-db                        # Initialize database\n", os.Args[0])
 	}
 }
@@ -1433,22 +1445,22 @@ func checkDataQuality(ctx context.Context, cfg *config.Config) error {
 		symbols = flag.Args()[1:]
 	}
 	
-	// 解析开始日期
+	// 解析开始日期（支持YYYY-MM-DD或YYYY-MM格式）
 	var startDatePtr *time.Time
 	if *startDate != "" {
-		parsed, err := time.Parse("2006-01-02", *startDate)
+		parsed, err := parseFlexibleDate(*startDate, true)
 		if err != nil {
-			return fmt.Errorf("invalid start date format (expected YYYY-MM-DD): %w", err)
+			return fmt.Errorf("invalid start date format (expected YYYY-MM-DD or YYYY-MM): %w", err)
 		}
 		startDatePtr = &parsed
 	}
 	
-	// 解析结束日期
+	// 解析结束日期（支持YYYY-MM-DD或YYYY-MM格式）
 	var endDatePtr *time.Time
 	if *endDate != "" {
-		parsed, err := time.Parse("2006-01-02", *endDate)
+		parsed, err := parseFlexibleDate(*endDate, false)
 		if err != nil {
-			return fmt.Errorf("invalid end date format (expected YYYY-MM-DD): %w", err)
+			return fmt.Errorf("invalid end date format (expected YYYY-MM-DD or YYYY-MM): %w", err)
 		}
 		endDatePtr = &parsed
 	}
@@ -1524,5 +1536,286 @@ func checkDataQuality(ctx context.Context, cfg *config.Config) error {
 		Str("format", *format).
 		Msg("Data quality check completed")
 	
+	return nil
+}
+
+// verifyData 执行数据验证（基于数据库的完整性检查）
+func verifyData(ctx context.Context, cfg *config.Config) error {
+	log := logger.GetLogger("verify_data")
+	log.Info().Msg("Starting data verification")
+	
+	// 记录开始时间用于报告
+	verificationStartTime := time.Now()
+	
+	// 初始化组件
+	comps, err := initializeComponents(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize components: %w", err)
+	}
+	defer comps.cleanup()
+	
+	// 解析交易对列表
+	var symbolList []string
+	if *symbols == "" {
+		// 如果没有指定symbols，获取数据库中所有交易对
+		log.Info().Msg("No symbols specified, fetching all symbols from database")
+		symbolInfos, err := comps.repository.GetAllSymbolInfos(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get all symbols from database: %w", err)
+		}
+		
+		if len(symbolInfos) == 0 {
+			return fmt.Errorf("no symbols found in database, please run data import first")
+		}
+		
+		// 提取symbol名称
+		symbolList = make([]string, len(symbolInfos))
+		for i, info := range symbolInfos {
+			symbolList[i] = info.Symbol
+		}
+		
+		log.Info().Int("symbols_count", len(symbolList)).Msg("Found symbols in database for verification")
+	} else {
+		// 解析用户指定的交易对列表
+		symbolList = parseSymbolsParameter(*symbols)
+		if len(symbolList) == 0 {
+			return fmt.Errorf("no valid symbols provided")
+		}
+	}
+	
+	// 解析开始日期（支持YYYY-MM-DD或YYYY-MM格式）
+	var startDatePtr *time.Time
+	if *startDate != "" {
+		parsed, err := parseFlexibleDate(*startDate, true)
+		if err != nil {
+			return fmt.Errorf("invalid start date format (expected YYYY-MM-DD or YYYY-MM): %w", err)
+		}
+		startDatePtr = &parsed
+	}
+	
+	// 解析结束日期（支持YYYY-MM-DD或YYYY-MM格式）
+	var endDatePtr *time.Time
+	if *endDate != "" {
+		parsed, err := parseFlexibleDate(*endDate, false)
+		if err != nil {
+			return fmt.Errorf("invalid end date format (expected YYYY-MM-DD or YYYY-MM): %w", err)
+		}
+		endDatePtr = &parsed
+	}
+	
+	// 注意：不再设置默认时间范围，而是基于数据库实际数据范围
+	
+	fmt.Printf("🔍 开始验证数据质量...\n")
+	if *symbols == "" {
+		fmt.Printf("📊 交易对: 所有交易对 (共%d个)\n", len(symbolList))
+	} else {
+		fmt.Printf("📊 交易对: %s\n", strings.Join(symbolList, ", "))
+	}
+	if startDatePtr != nil && endDatePtr != nil {
+		fmt.Printf("📅 时间范围: %s 到 %s\n", startDatePtr.Format("2006-01-02"), endDatePtr.Format("2006-01-02"))
+	} else {
+		fmt.Printf("📅 时间范围: 基于数据库实际数据范围\n")
+	}
+	fmt.Println()
+	
+	// 创建数据库验证检查器（新的基于数据库的验证逻辑）
+	databaseChecker := verification.NewDatabaseVerificationChecker(comps.repository)
+	
+	// 执行批量数据验证
+	batchReport, err := databaseChecker.VerifyBatchSymbols(ctx, symbolList, startDatePtr, endDatePtr)
+	if err != nil {
+		return fmt.Errorf("failed to verify data: %w", err)
+	}
+	
+	// 根据详细模式输出结果
+	if *detailed {
+		// 详细模式：输出JSON格式
+		reporter := verification.NewDatabaseReporter()
+		if err := reporter.WriteJSONReport(os.Stdout, batchReport); err != nil {
+			return fmt.Errorf("failed to write detailed report: %w", err)
+		}
+	} else {
+		// 简洁模式：输出用户友好的摘要
+		reporter := verification.NewDatabaseReporter()
+		consoleReport := reporter.GenerateBatchConsoleReport(batchReport)
+		fmt.Print(consoleReport)
+		
+		// 添加验证结论
+		fmt.Println("\n📋 验证结论:")
+		if batchReport.AverageCompleteness >= 95.0 {
+			fmt.Println("✅ 数据完整性优秀，无需特别关注")
+		} else if batchReport.AverageCompleteness >= 85.0 {
+			fmt.Println("⚠️  数据完整性良好，建议关注部分问题")
+		} else if batchReport.AverageCompleteness >= 70.0 {
+			fmt.Println("🔶 数据完整性一般，需要改进")
+		} else {
+			fmt.Println("❌ 数据完整性较差，需要立即处理")
+		}
+	}
+	
+	log.Info().
+		Int("total_symbols", len(symbolList)).
+		Int("verified_symbols", batchReport.VerifiedSymbols).
+		Float64("average_score", batchReport.AverageCompleteness).
+		Bool("detailed", *detailed).
+		Msg("Data verification completed")
+	
+	// 生成详细报告文档
+	if err := generateVerificationReport(batchReport, verificationStartTime); err != nil {
+		log.Warn().Err(err).Msg("Failed to generate verification report, but verification completed successfully")
+		fmt.Printf("\n⚠️  报告生成失败: %v\n", err)
+	}
+	
+	return nil
+}
+
+// generateVerificationReport 生成验证报告文档
+func generateVerificationReport(batchReport *verification.BatchDatabaseVerificationReport, startTime time.Time) error {
+	// 创建报告生成器和适配器
+	reportGenerator := reports.NewReportGenerator()
+	adapter := reports.NewVerificationResultAdapter()
+	
+	// 转换验证结果为报告格式
+	resultsForReport := adapter.ConvertBatchReport(batchReport)
+	executionTime := adapter.ExtractExecutionTime(batchReport, startTime)
+	
+	// 生成报告文件路径
+	reportPath := reports.GenerateDefaultReportPath()
+	
+	// 生成报告
+	actualPath, err := reportGenerator.GenerateVerificationReport(resultsForReport, executionTime, reportPath)
+	if err != nil {
+		return fmt.Errorf("failed to generate verification report: %w", err)
+	}
+	
+	// 分析报告问题
+	criticalSymbols, attentionSymbols := adapter.AnalyzeReportIssues(batchReport)
+	
+	// 显示报告生成结果
+	fmt.Printf("\n📄 详细报告已生成: %s\n", actualPath)
+	
+	// 生成摘要信息
+	reportSummary := adapter.GenerateReportSummary(batchReport, executionTime)
+	fmt.Printf("📊 %s\n", reportSummary)
+	
+	// 显示关键问题提示
+	if len(criticalSymbols) > 0 {
+		fmt.Printf("\n🚨 严重问题交易对 (%d个): ", len(criticalSymbols))
+		if len(criticalSymbols) <= 5 {
+			fmt.Printf("%s\n", strings.Join(criticalSymbols, ", "))
+		} else {
+			fmt.Printf("%s ... 等%d个\n", strings.Join(criticalSymbols[:5], ", "), len(criticalSymbols))
+		}
+	}
+	
+	if len(attentionSymbols) > 0 {
+		fmt.Printf("⚠️  需要关注交易对 (%d个): ", len(attentionSymbols))
+		if len(attentionSymbols) <= 5 {
+			fmt.Printf("%s\n", strings.Join(attentionSymbols, ", "))
+		} else {
+			fmt.Printf("%s ... 等%d个\n", strings.Join(attentionSymbols[:5], ", "), len(attentionSymbols))
+		}
+	}
+	
+	if len(criticalSymbols) > 0 || len(attentionSymbols) > 0 {
+		fmt.Printf("\n🔍 查看详细报告了解具体问题和修复建议\n")
+	} else {
+		fmt.Printf("\n🎉 所有交易对数据质量良好！\n")
+	}
+	
+	return nil
+}
+
+// parseSymbolsParameter 解析交易对参数
+func parseSymbolsParameter(symbolsStr string) []string {
+	if symbolsStr == "" {
+		return nil
+	}
+	
+	// 按逗号分割并清理空白字符
+	parts := strings.Split(symbolsStr, ",")
+	var result []string
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			// 转换为大写（Binance交易对通常是大写）
+			result = append(result, strings.ToUpper(part))
+		}
+	}
+	return result
+}
+
+// parseFlexibleDate 解析灵活的日期格式（支持YYYY-MM-DD或YYYY-MM）
+func parseFlexibleDate(dateStr string, isStartDate bool) (time.Time, error) {
+	// 首先尝试完整日期格式 YYYY-MM-DD
+	if parsed, err := time.Parse("2006-01-02", dateStr); err == nil {
+		return parsed, nil
+	}
+	
+	// 然后尝试月份格式 YYYY-MM
+	if parsed, err := time.Parse("2006-01", dateStr); err == nil {
+		if isStartDate {
+			// 开始日期：使用月份的第一天
+			return time.Date(parsed.Year(), parsed.Month(), 1, 0, 0, 0, 0, time.UTC), nil
+		} else {
+			// 结束日期：使用月份的最后一天
+			nextMonth := parsed.AddDate(0, 1, 0)
+			lastDay := nextMonth.Add(-24 * time.Hour)
+			return time.Date(lastDay.Year(), lastDay.Month(), lastDay.Day(), 23, 59, 59, 0, time.UTC), nil
+		}
+	}
+	
+	return time.Time{}, fmt.Errorf("invalid date format, expected YYYY-MM-DD or YYYY-MM")
+}
+
+// exportCSV 导出CSV数据
+func exportCSV(ctx context.Context, cfg *config.Config) error {
+	log := logger.GetLogger("export_csv")
+	log.Info().Msg("Starting CSV export")
+
+	// 初始化组件
+	components, err := initializeComponents(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize components: %w", err)
+	}
+	defer components.cleanup()
+
+	// 创建CSV导出器
+	exporter := csvexport.NewCSVExporter(components.repository)
+
+	// 解析时间范围参数
+	var startTimePtr *time.Time
+	if *startDate != "" {
+		parsed, err := parseFlexibleDate(*startDate, true)
+		if err != nil {
+			return fmt.Errorf("invalid start date format (expected YYYY-MM-DD or YYYY-MM): %w", err)
+		}
+		startTimePtr = &parsed
+	}
+
+	var endTimePtr *time.Time
+	if *endDate != "" {
+		parsed, err := parseFlexibleDate(*endDate, false)
+		if err != nil {
+			return fmt.Errorf("invalid end date format (expected YYYY-MM-DD or YYYY-MM): %w", err)
+		}
+		endTimePtr = &parsed
+	}
+
+	// 构建导出参数
+	params := csvexport.ExportParams{
+		Symbol:     *symbols,
+		Interval:   *interval,
+		StartTime:  startTimePtr,
+		EndTime:    endTimePtr,
+		OutputPath: *output,
+	}
+
+	// 执行导出
+	if err := exporter.Export(ctx, params); err != nil {
+		return fmt.Errorf("CSV export failed: %w", err)
+	}
+
+	log.Info().Msg("CSV export completed successfully")
 	return nil
 }

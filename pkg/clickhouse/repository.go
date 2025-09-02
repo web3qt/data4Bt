@@ -595,16 +595,16 @@ func (r *Repository) GetMonthlyDataStats(ctx context.Context, symbol string, mon
 		AND open_time <= ?
 	`
 	
-	var totalRecords int64
+	var totalRecordsUint uint64
 	var firstRecord, lastRecord time.Time
 	
 	row := r.conn.QueryRow(ctx, query, symbol, startOfMonth, endOfMonth)
-	err := row.Scan(&totalRecords, &firstRecord, &lastRecord)
+	err := row.Scan(&totalRecordsUint, &firstRecord, &lastRecord)
 	if err != nil {
 		return 0, time.Time{}, time.Time{}, fmt.Errorf("failed to get monthly data stats: %w", err)
 	}
 	
-	return totalRecords, firstRecord, lastRecord, nil
+	return int64(totalRecordsUint), firstRecord, lastRecord, nil
 }
 
 // CheckMonthlyDataExistence 检查月度数据存在性
@@ -721,15 +721,16 @@ func (r *Repository) GetDataCompletenessForSymbol(ctx context.Context, symbol st
 	
 	for rows.Next() {
 		var month string
-		var actualRecords int64
+		var actualRecordsUint uint64
 		var monthFirstRecord, monthLastRecord time.Time
 		
-		if err := rows.Scan(&month, &actualRecords, &monthFirstRecord, &monthLastRecord); err != nil {
+		if err := rows.Scan(&month, &actualRecordsUint, &monthFirstRecord, &monthLastRecord); err != nil {
 			return nil, fmt.Errorf("failed to scan completeness data: %w", err)
 		}
 		
 		// 计算该月的预期记录数
 		expectedRecords := r.calculateExpectedRecordsForMonth(month)
+		actualRecords := int64(actualRecordsUint)
 		completenessRatio := 0.0
 		if expectedRecords > 0 {
 			completenessRatio = float64(actualRecords) / float64(expectedRecords) * 100
@@ -887,4 +888,9 @@ func (r *Repository) UpdateSymbolInfo(ctx context.Context, symbolInfo *domain.Sy
 		symbolInfo.DataStatus,
 		symbolInfo.Symbol,
 	)
+}
+
+// QueryContext 执行查询并返回结果行
+func (r *Repository) QueryContext(ctx context.Context, query string, args ...interface{}) (driver.Rows, error) {
+	return r.conn.Query(ctx, query, args...)
 }
