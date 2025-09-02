@@ -6,16 +6,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
 	"sort"
 	"strings"
-	"sync"
-	"syscall"
 	"time"
 
 	"binance-data-loader/internal/config"
 	"binance-data-loader/internal/domain"
 	"binance-data-loader/internal/logger"
+	"binance-data-loader/internal/signal"
 	"binance-data-loader/internal/state"
 	"binance-data-loader/pkg/binance"
 	"binance-data-loader/pkg/clickhouse"
@@ -90,45 +88,19 @@ func main() {
 		Str("command", *command).
 		Msg("Starting application")
 
-	// 创建上下文
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// 设置信号处理
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	// 创建信号处理器
+	signalHandler := signal.NewSignalHandler(10*time.Second, log)
 	
-	// 用于跟踪是否已经开始关闭
-	var shutdownOnce sync.Once
-	
-	go func() {
-		sig := <-sigChan
-		shutdownOnce.Do(func() {
-			log.Info().
-				Str("signal", sig.String()).
-				Msg("Received shutdown signal, initiating graceful shutdown...")
-			fmt.Printf("\n🛑 收到停止信号 (%s)，正在优雅关闭系统...\n", sig.String())
-			fmt.Println("💡 请等待当前操作完成，系统将自动保存状态并退出")
-			fmt.Println("⚡ 如果系统无响应，请再按一次 Ctrl+C 强制退出")
-			cancel()
-			
-			// 设置优雅关闭超时
-			go func() {
-				time.Sleep(10 * time.Second)
-				log.Warn().Msg("Graceful shutdown timeout, forcing exit")
-				fmt.Println("\n⏰ 优雅关闭超时，强制退出！")
-				os.Exit(1)
-			}()
-		})
-		
-		// 如果再次收到信号，立即强制退出
-		sig2 := <-sigChan
-		log.Warn().
-			Str("signal", sig2.String()).
-			Msg("Received second shutdown signal, forcing immediate exit")
-		fmt.Printf("\n⚠️  收到第二次停止信号 (%s)，立即强制退出！\n", sig2.String())
+	// 启动信号处理
+	if err := signalHandler.Start(context.Background()); err != nil {
+		log.Error().Err(err).Msg("Failed to start signal handler")
+		fmt.Fprintf(os.Stderr, "Failed to start signal handler: %v\n", err)
 		os.Exit(1)
-	}()
+	}
+	defer signalHandler.Stop()
+
+	// 获取信号处理器的上下文
+	ctx := signalHandler.GetContext()
 
 	// 执行命令
 	if err := executeCommand(ctx, cfg, *command); err != nil {

@@ -393,7 +393,7 @@ func (r *Repository) createSymbolInfoTable(ctx context.Context) error {
 			data_status String,
 			created_at DateTime DEFAULT now(),
 			updated_at DateTime DEFAULT now()
-		) ENGINE = MergeTree()
+		) ENGINE = ReplacingMergeTree(updated_at)
 		ORDER BY symbol
 		SETTINGS index_granularity = 8192
 	`
@@ -479,14 +479,8 @@ func (r *Repository) getIntervalMinutes(interval string) int {
 	}
 }
 
-// SaveSymbolInfo 保存交易对信息
+// SaveSymbolInfo 保存交易对信息 (使用UPSERT逻辑)
 func (r *Repository) SaveSymbolInfo(ctx context.Context, symbolInfo *domain.SymbolInfo) error {
-	query := `
-		INSERT INTO symbol_infos 
-		(symbol, status, base_asset, quote_asset, earliest_date, latest_date, total_months, data_status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, now(), now())
-	`
-	
 	// 提取基础资产和报价资产
 	baseAsset := symbolInfo.BaseAsset
 	quoteAsset := symbolInfo.QuoteAsset
@@ -501,16 +495,54 @@ func (r *Repository) SaveSymbolInfo(ctx context.Context, symbolInfo *domain.Symb
 		}
 	}
 	
-	return r.conn.Exec(ctx, query,
-		symbolInfo.Symbol,
-		symbolInfo.Status,
-		baseAsset,
-		quoteAsset,
-		symbolInfo.EarliestDate,
-		symbolInfo.LatestDate,
-		symbolInfo.TotalMonths,
-		symbolInfo.DataStatus,
-	)
+	// 检查记录是否已存在
+	existingInfo, err := r.GetSymbolInfo(ctx, symbolInfo.Symbol)
+	if err != nil && err.Error() != "sql: no rows in result set" {
+		return fmt.Errorf("failed to check existing symbol info: %w", err)
+	}
+	
+	if existingInfo != nil {
+		// 更新现有记录
+		updateQuery := `
+			ALTER TABLE symbol_infos UPDATE 
+				status = ?,
+				base_asset = ?,
+				quote_asset = ?,
+				earliest_date = ?,
+				latest_date = ?,
+				total_months = ?,
+				data_status = ?,
+				updated_at = now()
+			WHERE symbol = ?
+		`
+		return r.conn.Exec(ctx, updateQuery,
+			symbolInfo.Status,
+			baseAsset,
+			quoteAsset,
+			symbolInfo.EarliestDate,
+			symbolInfo.LatestDate,
+			symbolInfo.TotalMonths,
+			symbolInfo.DataStatus,
+			symbolInfo.Symbol,
+		)
+	} else {
+		// 插入新记录
+		insertQuery := `
+			INSERT INTO symbol_infos 
+			(symbol, status, base_asset, quote_asset, earliest_date, latest_date, total_months, data_status, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, now(), now())
+		`
+		return r.conn.Exec(ctx, insertQuery,
+			symbolInfo.Symbol,
+			symbolInfo.Status,
+			baseAsset,
+			quoteAsset,
+			symbolInfo.EarliestDate,
+			symbolInfo.LatestDate,
+			symbolInfo.TotalMonths,
+			symbolInfo.DataStatus,
+		)
+	}
 }
 
 // GetSymbolInfo 获取交易对信息

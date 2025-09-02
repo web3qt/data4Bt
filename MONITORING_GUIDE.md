@@ -25,14 +25,15 @@
 
 ### 2. 启动Web监控面板
 ```bash
-# 启动监控面板 (端口8888)
-./monitor
+# 启动监控面板 (端口8890) - 集成在主程序中
+# 运行主程序时会自动启动监控面板
+go run cmd/main.go
 
-# 指定端口启动
-./monitor 9000
+# 或使用优化启动脚本
+./start_optimized.sh
 ```
 
-然后在浏览器中访问：http://localhost:8888
+然后在浏览器中访问：http://localhost:8890
 
 ### 3. 启动数据加载器 (优化版)
 ```bash
@@ -118,9 +119,9 @@ go build -o tools/status_checker tools/status_checker.go
 - **状态指示**: 清晰的颜色标识不同状态
 
 ### 访问方式
-1. 启动监控服务：`./monitor`
-2. 打开浏览器访问：http://localhost:8888
-3. 如需更换端口：`./monitor 9000`
+1. 启动数据加载器（自动启动监控）：`go run cmd/main.go`
+2. 打开浏览器访问：http://localhost:8890
+3. 监控面板会在数据加载器运行时自动启用
 
 ### API接口
 - **系统概览**: GET `/api/data` - 获取完整系统状态
@@ -135,7 +136,7 @@ go build -o tools/status_checker tools/status_checker.go
 4. **正式运行**: `./start_optimized.sh --background` 后台执行
 
 ### 日常监控
-1. **Web面板**: 浏览器访问 http://localhost:8888 查看实时状态
+1. **Web面板**: 浏览器访问 http://localhost:8890 查看实时状态
 2. **命令检查**: `./check_status.sh` 快速检查
 3. **详细状态**: `./tools/status_checker` 查看详细信息
 4. **日志监控**: `tail -f logs/data_loader.log` 查看实时日志
@@ -154,8 +155,8 @@ go build -o tools/status_checker tools/status_checker.go
 - `start_optimized.sh` - 优化版启动脚本
 - `tools/status_checker.go` - 状态查询工具源码
 - `tools/status_checker` - 编译后的状态查询工具
-- `tools/simple_monitor.go` - Web监控工具源码
-- `monitor` - 编译后的Web监控工具
+- `pkg/webmonitor/` - 集成的Web监控模块源码
+- 监控功能已集成到主程序中，无需独立的监控工具
 - `tools/monitor_dashboard.html` - 静态监控页面模板
 
 ### 配置文件

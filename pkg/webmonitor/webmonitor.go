@@ -196,7 +196,14 @@ func (w *WebMonitor) getSystemOverview() (*SystemOverview, error) {
 		// 直接在这里计算基于数据库的实际进度
 		if infoQuery := `SELECT total_months FROM symbol_infos WHERE symbol = ?`; true {
 			var totalMonths int32
-			if err := w.db.QueryRow(infoQuery, symbol.Symbol).Scan(&totalMonths); err == nil && totalMonths > 0 {
+			err := w.db.QueryRow(infoQuery, symbol.Symbol).Scan(&totalMonths)
+			w.logger.Info().
+				Str("symbol", symbol.Symbol).
+				Err(err).
+				Int32("total_months", totalMonths).
+				Msg("Querying symbol_infos for total_months")
+				
+			if err == nil && totalMonths > 0 {
 				symbol.Progress = w.calculateActualProgress(symbol.Symbol, totalMonths)
 				w.logger.Info().
 					Str("symbol", symbol.Symbol).
@@ -204,6 +211,11 @@ func (w *WebMonitor) getSystemOverview() (*SystemOverview, error) {
 					Int32("total_months", totalMonths).
 					Msg("Calculated progress directly from database")
 			} else {
+				w.logger.Warn().
+					Str("symbol", symbol.Symbol).
+					Err(err).
+					Int32("total_months", totalMonths).
+					Msg("No total_months data found for symbol, setting progress to 0")
 				symbol.Progress = 0.0
 			}
 		}
@@ -248,7 +260,13 @@ func (w *WebMonitor) getSystemOverview() (*SystemOverview, error) {
 
 // calculateActualProgress 基于数据库数据计算实际进度
 func (w *WebMonitor) calculateActualProgress(symbol string, totalMonths int32) float64 {
+	w.logger.Info().
+		Str("symbol", symbol).
+		Int32("total_months", totalMonths).
+		Msg("Starting progress calculation")
+		
 	if totalMonths == 0 {
+		w.logger.Warn().Str("symbol", symbol).Msg("Total months is 0, returning 0% progress")
 		return 0.0
 	}
 	
@@ -257,7 +275,7 @@ func (w *WebMonitor) calculateActualProgress(symbol string, totalMonths int32) f
 	var actualMonths int32
 	err := w.db.QueryRow(query, symbol).Scan(&actualMonths)
 	if err != nil {
-		w.logger.Debug().Err(err).Str("symbol", symbol).Msg("Failed to calculate actual progress")
+		w.logger.Error().Err(err).Str("symbol", symbol).Msg("Failed to calculate actual progress")
 		return 0.0
 	}
 	
@@ -267,12 +285,12 @@ func (w *WebMonitor) calculateActualProgress(symbol string, totalMonths int32) f
 		progress = 100.0
 	}
 	
-	w.logger.Debug().
+	w.logger.Info().
 		Str("symbol", symbol).
 		Int32("actual_months", actualMonths).
 		Int32("total_months", totalMonths).
 		Float64("progress", progress).
-		Msg("Calculated actual progress")
+		Msg("Calculated actual progress successfully")
 	
 	return progress
 }
@@ -352,12 +370,29 @@ func (w *WebMonitor) mergeWithStateManager(dbSymbols []SymbolData) []SymbolData 
 		}
 	}
 
-	// 获取Symbol进度信息
+	// 获取Symbol进度信息 - 但只在没有数据库数据时使用状态文件的进度
 	if symbolProgresses, err := w.stateManager.GetAllSymbolProgress(); err == nil {
 		for symbol, progress := range symbolProgresses {
 			if existing, exists := symbolMap[symbol]; exists {
 				existing.WorkerID = progress.WorkerID
-				existing.Progress = progress.Progress
+				
+				// 仅在没有实际数据库记录时使用状态文件的进度
+				// 有数据库记录时，使用之前计算的实际进度
+				if existing.RecordCount == 0 {
+					existing.Progress = progress.Progress
+					w.logger.Debug().
+						Str("symbol", symbol).
+						Float64("state_progress", progress.Progress).
+						Msg("Using state file progress (no database data)")
+				} else {
+					w.logger.Debug().
+						Str("symbol", symbol).
+						Float64("database_progress", existing.Progress).
+						Float64("state_progress", progress.Progress).
+						Int64("record_count", existing.RecordCount).
+						Msg("Keeping database-calculated progress (has data)")
+				}
+				
 				existing.Status = progress.Status
 			}
 		}

@@ -13,6 +13,8 @@
 - 📈 **进度监控**: 实时进度报告和Web仪表板
 - 🔄 **状态管理**: 支持断点续传和增量更新
 - 📝 **结构化日志**: 详细的操作日志和性能指标
+- 🛑 **智能信号处理**: 优雅的进程管理和快速响应Ctrl+C
+- 🔧 **进程管理**: 智能进程查找、优雅关闭和强制终止机制
 
 ### 技术特性
 
@@ -21,6 +23,9 @@
 - **错误恢复**: 自动重试和错误处理机制
 - **配置灵活**: 支持YAML配置文件
 - **监控友好**: 提供HTTP API和Web界面
+- **信号处理**: 完善的SIGTERM/SIGINT处理，支持优雅关闭
+- **进程管理**: 多种进程查找方式（PID文件、进程名、端口）
+- **脚本集成**: 改进的启动和停止脚本，支持前后台运行模式
 
 ## 系统架构
 
@@ -140,6 +145,27 @@ curl http://localhost:8123/ping
 
 ### 7. 运行数据加载
 
+#### 使用改进的启动脚本 (推荐)
+
+```bash
+# 前台运行 (默认模式)
+./start.sh
+
+# 后台运行
+./start.sh --background
+
+# 测试模式 (仅下载BTCUSDT数据)
+./start.sh --test
+
+# 测试指定交易对
+./start.sh --test --symbols ETHUSDT
+
+# 详细输出模式
+./start.sh --verbose
+```
+
+#### 直接使用Go命令
+
 ```bash
 # 复制配置文件到项目根目录（如果还没有的话）
 cp configs/config.yml config.yml
@@ -160,7 +186,35 @@ go run cmd/main.go -cmd=run -symbols=BTCUSDT,ETHUSDT
 go run cmd/main.go -cmd=create-views
 ```
 
-### 9. 定期维护
+### 9. 停止数据加载
+
+#### 使用改进的停止脚本 (推荐)
+
+```bash
+# 智能停止所有Data4BT相关进程
+./stop.sh
+
+# 详细输出模式
+./stop.sh --verbose
+
+# 预览模式 (查看将要停止的进程，不实际执行)
+./stop.sh --dry-run
+
+# 自定义超时时间
+./stop.sh --timeout 60 --force-timeout 15
+```
+
+#### 手动停止
+
+```bash
+# 使用Ctrl+C停止前台运行的程序
+# 程序会优雅地处理信号并安全退出
+
+# 或者查找并手动终止进程
+pgrep -f "go run.*cmd/main.go" | xargs kill -TERM
+```
+
+### 10. 定期维护
 
 建议定期运行以下命令来维护数据的完整性：
 
@@ -458,6 +512,20 @@ ORDER BY (symbol, open_time)
    - 验证数据完整性
    - 查看详细错误日志
 
+5. **Ctrl+C无法停止程序**
+   - 使用改进的停止脚本: `./stop.sh`
+   - 检查是否有僵尸进程: `./stop.sh --dry-run`
+   - 强制终止: `./stop.sh --force-timeout 5`
+
+6. **进程无法正常启动**
+   - 检查是否有残留进程: `./stop.sh --verbose`
+   - 清理PID文件: `rm -f .data_loader_pid`
+   - 使用测试模式验证: `./start.sh --test`
+
+7. **脚本权限问题**
+   - 添加执行权限: `chmod +x start.sh stop.sh`
+   - 检查脚本依赖: `ls -la scripts/`
+
 ### 日志分析
 
 系统提供详细的结构化日志：
@@ -512,6 +580,22 @@ grep "data_quality" logs/app.log
    - 实现 `domain.Parser` 接口
    - 添加数据验证和转换逻辑
 
+## 文档
+
+### 详细文档
+
+- 📖 [API文档](docs/API.md) - HTTP API接口说明
+- 🛠️ [故障排除指南](docs/TROUBLESHOOTING.md) - 常见问题和解决方案
+- 🔧 [信号处理机制](docs/SIGNAL_HANDLING.md) - 信号处理实现详解
+- 🚀 [优化路线图](docs/OPTIMIZATION_ROADMAP.md) - 性能优化指南
+
+### 快速链接
+
+- [快速开始](#快速开始) - 快速部署和运行
+- [命令详细说明](#命令详细说明) - 所有命令的使用方法
+- [故障排除](#故障排除) - 常见问题解决
+- [性能优化](#性能优化) - 系统调优建议
+
 ## 许可证
 
 MIT License
@@ -521,6 +605,17 @@ MIT License
 欢迎提交Issue和Pull Request！
 
 ## 更新日志
+
+### v1.2.0
+
+- 🛑 **重大改进**: 完全重构信号处理机制，解决Ctrl+C无法停止的问题
+- 🔧 **新增**: 智能进程管理函数库 (`scripts/process_manager.sh`)
+- ✨ **改进**: 启动脚本支持前台/后台/测试三种运行模式
+- 🚀 **新增**: 停止脚本支持dry-run预览和详细输出模式
+- 🔍 **增强**: 多种进程查找方式（PID文件、进程名、端口监听）
+- ⚡ **优化**: 优雅关闭机制，支持自定义超时时间
+- 🧪 **新增**: 完整的测试套件，覆盖脚本功能验证
+- 📚 **完善**: 详细的故障排除指南和使用文档
 
 ### v1.1.0
 

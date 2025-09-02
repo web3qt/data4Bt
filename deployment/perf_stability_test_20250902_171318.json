@@ -1,0 +1,31 @@
+{"test_name":"stability_test","start_time":1756804398,"metrics":[
+{"timestamp":1756804398,"cpu_usage":"11.21","memory_usage":"306261","disk_usage":"92","process_count":       0
+0}
+,
+{"timestamp":1756804404,"cpu_usage":"6.36","memory_usage":"306591","disk_usage":"92","process_count":       0
+0}
+,
+{"timestamp":1756804411,"cpu_usage":"7.13","memory_usage":"306686","disk_usage":"92","process_count":       0
+0}
+,
+{"timestamp":1756804417,"cpu_usage":"8.1","memory_usage":"304910","disk_usage":"92","process_count":       0
+0}
+,
+{"timestamp":1756804423,"cpu_usage":"7.59","memory_usage":"307200","disk_usage":"92","process_count":       0
+0}
+,
+{"timestamp":1756804429,"cpu_usage":"6.62","memory_usage":"308051","disk_usage":"92","process_count":       0
+0}
+,
+{"timestamp":1756804436,"cpu_usage":"6.49","memory_usage":"308148","disk_usage":"92","process_count":       0
+0}
+,
+{"timestamp":1756804442,"cpu_usage":"9.70","memory_usage":"305831","disk_usage":"92","process_count":       0
+0}
+,
+{"timestamp":1756804448,"cpu_usage":"6.88","memory_usage":"309431","disk_usage":"92","process_count":       0
+0}
+,
+{"timestamp":1756804454,"cpu_usage":"11.62","memory_usage":"309653","disk_usage":"92","process_count":       0
+0}
+]}
