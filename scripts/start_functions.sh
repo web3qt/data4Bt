@@ -83,10 +83,11 @@ show_status() {
 check_required_commands() {
     log_info "检查必要的命令..."
     
-    local required_commands=("go" "docker" "curl" "pgrep" "pkill")
+    local core_commands=("go" "curl" "pgrep" "pkill")
     local missing_commands=()
     
-    for cmd in "${required_commands[@]}"; do
+    # 检查核心命令
+    for cmd in "${core_commands[@]}"; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
             missing_commands+=("$cmd")
         fi
@@ -97,8 +98,121 @@ check_required_commands() {
         return 1
     fi
     
+    # Docker检查单独处理
+    check_docker_environment
+    
     show_status "✅" "所有必要命令已安装"
     return 0
+}
+
+# 检查Docker环境
+check_docker_environment() {
+    log_info "检查Docker环境..."
+    
+    # 检查Docker是否安装
+    if ! command -v docker >/dev/null 2>&1; then
+        log_warn "Docker未安装"
+        offer_docker_installation
+        return 1
+    fi
+    
+    # 检查Docker服务是否运行
+    if ! docker info >/dev/null 2>&1; then
+        log_warn "Docker服务未运行"
+        log_info "请启动Docker服务:"
+        echo "  - macOS: 启动Docker Desktop"
+        echo "  - Linux: sudo systemctl start docker"
+        echo "  - 或运行: sudo dockerd"
+        return 1
+    fi
+    
+    # 检查Docker Compose
+    if ! command -v docker-compose >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1; then
+        log_warn "Docker Compose未安装"
+        offer_docker_compose_installation
+        return 1
+    fi
+    
+    show_status "✅" "Docker环境正常"
+    return 0
+}
+
+# 提供Docker安装指导
+offer_docker_installation() {
+    log_info "Docker安装指导:"
+    echo ""
+    echo "请选择你的操作系统安装Docker:"
+    echo ""
+    echo "🖥️  macOS:"
+    echo "   - 下载Docker Desktop: https://www.docker.com/products/docker-desktop/"
+    echo "   - 或使用Homebrew: brew install --cask docker"
+    echo ""
+    echo "🐧 Ubuntu/Debian:"
+    echo "   curl -fsSL https://get.docker.com -o get-docker.sh"
+    echo "   sudo sh get-docker.sh"
+    echo ""
+    echo "🔴 CentOS/RHEL:"
+    echo "   sudo yum install -y docker"
+    echo "   sudo systemctl start docker"
+    echo ""
+    echo "📦 或者使用官方一键安装脚本:"
+    echo "   curl -fsSL https://get.docker.com | sh"
+    echo ""
+    
+    # 询问是否尝试自动安装
+    if command -v curl >/dev/null 2>&1; then
+        echo -n "是否尝试自动安装Docker? (y/N): "
+        read -r response
+        if [[ "$response" =~ ^[Yy]$ ]]; then
+            attempt_docker_installation
+        fi
+    fi
+}
+
+# 尝试自动安装Docker
+attempt_docker_installation() {
+    log_info "尝试自动安装Docker..."
+    
+    # 检测操作系统
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        log_info "检测到macOS，请手动安装Docker Desktop"
+        return 1
+    elif command -v apt-get >/dev/null 2>&1; then
+        # Ubuntu/Debian
+        log_info "检测到Ubuntu/Debian，尝试安装Docker..."
+        if curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh get-docker.sh; then
+            sudo systemctl start docker
+            sudo usermod -aG docker "$USER"
+            log_success "Docker安装完成，请重新登录或运行: newgrp docker"
+            return 0
+        fi
+    elif command -v yum >/dev/null 2>&1; then
+        # CentOS/RHEL
+        log_info "检测到CentOS/RHEL，尝试安装Docker..."
+        if sudo yum install -y docker; then
+            sudo systemctl start docker
+            sudo systemctl enable docker
+            sudo usermod -aG docker "$USER"
+            log_success "Docker安装完成"
+            return 0
+        fi
+    fi
+    
+    log_error "自动安装失败，请手动安装Docker"
+    return 1
+}
+
+# 提供Docker Compose安装指导
+offer_docker_compose_installation() {
+    log_info "Docker Compose安装指导:"
+    echo ""
+    echo "📦 安装Docker Compose:"
+    echo "   sudo curl -L \"https://github.com/docker/compose/releases/latest/download/docker-compose-\$(uname -s)-\$(uname -m)\" -o /usr/local/bin/docker-compose"
+    echo "   sudo chmod +x /usr/local/bin/docker-compose"
+    echo ""
+    echo "或者使用pip安装:"
+    echo "   pip install docker-compose"
+    echo ""
 }
 
 # 检查Go环境
@@ -128,16 +242,27 @@ check_go_environment() {
 check_clickhouse_container() {
     log_info "检查ClickHouse容器..."
     
+    # 首先检查Docker是否可用
+    if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+        log_error "Docker不可用，无法检查ClickHouse容器"
+        log_info "请先确保Docker已安装并运行"
+        return 1
+    fi
+    
     local container_name=""
     
-    # 检查新容器
-    if docker ps --format "table {{.Names}}" | grep -q "data4bt-clickhouse"; then
+    # 检查新容器（优先级最高）
+    if docker ps --format "table {{.Names}}" 2>/dev/null | grep -q "data4bt-clickhouse"; then
         container_name="data4bt-clickhouse"
         log_debug "发现data4bt-clickhouse容器"
     # 检查共享容器
-    elif docker ps --format "table {{.Names}}" | grep -q "shared-clickhouse"; then
+    elif docker ps --format "table {{.Names}}" 2>/dev/null | grep -q "shared-clickhouse"; then
         container_name="shared-clickhouse"
         log_debug "发现shared-clickhouse容器"
+    # 检查已停止的容器
+    elif docker ps -a --format "table {{.Names}}\t{{.Status}}" 2>/dev/null | grep -q "data4bt-clickhouse.*Exited"; then
+        log_warn "data4bt-clickhouse容器已停止"
+        return 2  # 特殊返回码表示容器存在但未运行
     else
         log_warn "ClickHouse容器未运行"
         return 1
@@ -180,25 +305,102 @@ test_clickhouse_connection() {
 start_clickhouse_container() {
     log_info "启动ClickHouse容器..."
     
+    # 检查Docker是否可用
+    if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+        log_error "Docker不可用，无法启动ClickHouse容器"
+        offer_docker_installation
+        return 1
+    fi
+    
+    # 检查是否有已停止的容器可以重启
+    if docker ps -a --format "table {{.Names}}\t{{.Status}}" 2>/dev/null | grep -q "data4bt-clickhouse.*Exited"; then
+        log_info "发现已停止的data4bt-clickhouse容器，正在重启..."
+        if docker start data4bt-clickhouse; then
+            wait_for_clickhouse_startup "data4bt-clickhouse"
+            return $?
+        else
+            log_warn "容器重启失败，尝试重新创建"
+            docker rm -f data4bt-clickhouse 2>/dev/null || true
+        fi
+    fi
+    
     # 首先尝试使用智能启动脚本
     if [ -f "./start_clickhouse.sh" ]; then
         log_debug "使用智能启动脚本"
         if ./start_clickhouse.sh auto; then
-            sleep 10  # 等待容器完全启动
-            return 0
+            wait_for_clickhouse_startup "data4bt-clickhouse"
+            return $?
         fi
     fi
     
-    # 回退到docker compose
-    log_debug "使用docker compose启动"
-    if docker compose up -d clickhouse; then
-        log_info "等待ClickHouse启动..."
-        sleep 30
-        return 0
+    # 尝试使用docker-compose
+    if [ -f "docker-compose.yml" ]; then
+        log_debug "使用docker-compose启动"
+        if docker-compose up -d clickhouse 2>/dev/null || docker compose up -d clickhouse 2>/dev/null; then
+            wait_for_clickhouse_startup "data4bt-clickhouse"
+            return $?
+        fi
     fi
     
-    log_error "ClickHouse启动失败"
+    # 最后尝试直接运行容器
+    log_info "尝试直接启动ClickHouse容器..."
+    if start_clickhouse_directly; then
+        wait_for_clickhouse_startup "data4bt-clickhouse"
+        return $?
+    fi
+    
+    log_error "ClickHouse启动失败，请检查Docker环境和配置"
     return 1
+}
+
+# 等待ClickHouse启动完成
+wait_for_clickhouse_startup() {
+    local container_name="$1"
+    local max_wait=60
+    local wait_count=0
+    
+    log_info "等待ClickHouse启动 (最多等待${max_wait}秒)..."
+    
+    while [ $wait_count -lt $max_wait ]; do
+        if test_clickhouse_connection "$container_name"; then
+            show_status "✅" "ClickHouse启动成功"
+            return 0
+        fi
+        
+        # 每10秒显示一次进度
+        if [ $((wait_count % 10)) -eq 0 ] && [ $wait_count -gt 0 ]; then
+            log_info "等待中... (${wait_count}/${max_wait}秒)"
+        fi
+        
+        sleep 2
+        wait_count=$((wait_count + 2))
+    done
+    
+    log_error "ClickHouse启动超时"
+    
+    # 显示容器日志帮助诊断
+    log_info "显示容器日志 (最后20行):"
+    docker logs --tail 20 "$container_name" 2>/dev/null || true
+    
+    return 1
+}
+
+# 直接启动ClickHouse容器
+start_clickhouse_directly() {
+    log_info "直接启动基础ClickHouse容器..."
+    
+    # 创建基本的ClickHouse容器
+    docker run -d \
+        --name data4bt-clickhouse \
+        --restart unless-stopped \
+        -p 8123:8123 \
+        -p 9000:9000 \
+        -e CLICKHOUSE_DB=data4BT \
+        -e CLICKHOUSE_USER=default \
+        -e CLICKHOUSE_PASSWORD=123456 \
+        clickhouse/clickhouse-server:23.8-alpine
+    
+    return $?
 }
 
 # 检查网络连接
@@ -647,39 +849,95 @@ perform_environment_check() {
     
     # 检查必要命令
     if ! check_required_commands; then
+        log_error "基础命令检查失败，请先安装必要的软件"
         return 1
     fi
     
     # 检查Go环境
     if ! check_go_environment; then
+        log_error "Go环境检查失败，请先安装Go 1.19+"
         return 1
     fi
     
     # 检查配置文件
     if ! check_config_file; then
+        log_error "配置文件检查失败，请确保config.yml存在且格式正确"
         return 1
     fi
     
     # 检查ClickHouse
-    local clickhouse_container
-    if ! clickhouse_container=$(check_clickhouse_container); then
-        log_warn "ClickHouse容器未运行，尝试启动..."
-        if ! start_clickhouse_container; then
-            log_error "ClickHouse启动失败"
+    local clickhouse_result
+    local clickhouse_container=""
+    
+    clickhouse_result=$(check_clickhouse_container 2>&1)
+    local check_exit_code=$?
+    
+    case $check_exit_code in
+        0)
+            # 容器运行正常
+            clickhouse_container=$(echo "$clickhouse_result" | tail -n 1)
+            log_info "使用现有ClickHouse容器: $clickhouse_container"
+            ;;
+        2)
+            # 容器存在但已停止
+            log_info "ClickHouse容器已停止，尝试启动..."
+            if start_clickhouse_container; then
+                log_success "ClickHouse容器已启动"
+            else
+                log_error "ClickHouse容器启动失败"
+                return 1
+            fi
+            ;;
+        1)
+            # 容器不存在或其他问题
+            log_warn "ClickHouse容器未运行，尝试启动..."
+            if start_clickhouse_container; then
+                log_success "ClickHouse容器已启动"
+            else
+                log_error "ClickHouse启动失败"
+                show_clickhouse_help
+                return 1
+            fi
+            ;;
+        *)
+            log_error "ClickHouse检查出现异常"
             return 1
-        fi
-        # 重新检查
-        if ! clickhouse_container=$(check_clickhouse_container); then
-            log_error "ClickHouse启动后仍无法连接"
-            return 1
-        fi
-    fi
+            ;;
+    esac
     
     # 检查网络连接
     check_network_connectivity || true  # 网络失败不阻止启动
     
     show_status "✅" "环境检查完成"
     return 0
+}
+
+# 显示ClickHouse帮助信息
+show_clickhouse_help() {
+    echo ""
+    log_info "ClickHouse启动失败，可能的解决方案:"
+    echo ""
+    echo "1. 🐳 检查Docker环境:"
+    echo "   docker --version"
+    echo "   docker info"
+    echo ""
+    echo "2. 🔧 手动启动ClickHouse:"
+    echo "   docker-compose up -d clickhouse"
+    echo "   # 或"
+    echo "   ./start_clickhouse.sh"
+    echo ""
+    echo "3. 📝 检查配置文件:"
+    echo "   确保 docker-compose.yml 存在"
+    echo "   确保 docker/clickhouse/ 目录存在"
+    echo ""
+    echo "4. 🔍 查看详细日志:"
+    echo "   docker logs data4bt-clickhouse"
+    echo ""
+    echo "5. 🆘 重置环境:"
+    echo "   docker-compose down"
+    echo "   docker system prune -f"
+    echo "   docker-compose up -d clickhouse"
+    echo ""
 }
 
 # 准备启动环境
