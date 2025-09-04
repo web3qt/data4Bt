@@ -41,7 +41,7 @@ database:
       - "localhost:9000"  # 本地开发环境，生产环境请修改为实际地址
     database: "data4BT"
     username: "default"  # 生产环境请修改为实际用户名
-    password: "123456"    # 生产环境请修改为实际密码
+    password: "qCWtqZzu8Lj2"    # 生产环境请修改为实际密码
     settings:
       max_memory_usage: 4000000000      # 4GB内存限制
       max_threads: 16
