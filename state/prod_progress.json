@@ -1,11 +1,11 @@
 {
   "BTCUSDT": {
     "symbol": "BTCUSDT",
-    "last_date": "2020-08-01T00:00:00Z",
+    "last_date": "2021-10-01T00:00:00Z",
     "total_files": 0,
-    "processed": 35,
+    "processed": 49,
     "failed": 0,
-    "last_updated": "2025-09-04T16:32:20.769378+08:00",
+    "last_updated": "2025-09-04T16:32:36.799735+08:00",
     "status": "pending",
     "worker_id": -1,
     "start_date": "0001-01-01T00:00:00Z",
