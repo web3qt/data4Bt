@@ -432,23 +432,35 @@ check_network_connectivity() {
 check_config_file() {
     log_info "检查配置文件..."
     
-    if [ ! -f "$CONFIG_FILE" ]; then
-        log_error "配置文件 $CONFIG_FILE 不存在"
+    # 检查配置文件路径，支持configs目录
+    local config_path="$CONFIG_FILE"
+    if [[ "$CONFIG_FILE" == config-*.yml ]] && [ ! -f "$CONFIG_FILE" ]; then
+        config_path="configs/$CONFIG_FILE"
+    fi
+    
+    if [ ! -f "$config_path" ]; then
+        log_error "配置文件 $config_path 不存在"
+        if [[ "$CONFIG_FILE" == config-*.yml ]]; then
+            log_info "提示: 请确保配置文件存在于 configs/ 目录中"
+            log_info "或者从示例文件复制: cp configs/$CONFIG_FILE.example configs/$CONFIG_FILE"
+        fi
         return 1
     fi
     
     # 基本的文件可读性检查
-    if [ ! -r "$CONFIG_FILE" ]; then
-        log_error "配置文件 $CONFIG_FILE 不可读"
+    if [ ! -r "$config_path" ]; then
+        log_error "配置文件 $config_path 不可读"
         return 1
     fi
     
     # 简单的YAML格式检查（检查是否包含基本的YAML结构）
-    if ! grep -q ":" "$CONFIG_FILE"; then
-        log_error "配置文件 $CONFIG_FILE 不是有效的YAML格式"
+    if ! grep -q ":" "$config_path"; then
+        log_error "配置文件 $config_path 不是有效的YAML格式"
         return 1
     fi
     
+    # 更新CONFIG_FILE为实际路径
+    CONFIG_FILE="$config_path"
     show_status "✅" "配置文件检查通过: $CONFIG_FILE"
     return 0
 }

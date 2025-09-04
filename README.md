@@ -64,13 +64,28 @@ go mod download
 
 ### 3. 配置文件
 
-复制并修改配置文件：
+项目支持多环境配置，根据不同的使用场景选择合适的配置：
 
+#### 默认配置
 ```bash
 cp config.yml.example config.yml
 ```
 
-主要配置项：
+#### 开发环境配置
+```bash
+cp configs/config-dev.yml.example configs/config-dev.yml
+# 编辑配置文件以适应你的开发环境
+vim configs/config-dev.yml
+```
+
+#### 生产环境配置
+```bash
+cp configs/config-prod.yml.example configs/config-prod.yml
+# 编辑配置文件以适应你的生产环境
+vim configs/config-prod.yml
+```
+
+#### 主要配置项：
 
 ```yaml
 # ClickHouse数据库配置
@@ -86,6 +101,20 @@ scheduler:
   batch_days: 7
   concurrent_symbols: 5
 ```
+
+#### 环境配置差异
+
+| 配置项 | 开发环境 | 生产环境 |
+|--------|----------|----------|
+| 日志级别 | debug | warn |
+| 日志格式 | text | json |
+| 下载并发数 | 5 | 20 |
+| 解析并发数 | 3 | 10 |
+| 批次大小 | 10000 | 50000 |
+| 超时时间 | 30s | 120s |
+| 重试次数 | 3 | 10 |
+
+详细的环境配置说明请参考 [docs/DEV_ENVIRONMENT.md](docs/DEV_ENVIRONMENT.md)
 
 ### 4. 初始化数据库
 
@@ -148,17 +177,20 @@ curl http://localhost:8123/ping
 #### 使用改进的启动脚本 (推荐)
 
 ```bash
-# 前台运行 (默认模式)
+# 前台运行 (默认配置)
 ./start.sh
 
-# 后台运行
+# 后台运行 (默认配置)
 ./start.sh --background
 
-# 测试模式 (仅下载BTCUSDT数据)
-./start.sh --test
+# 开发环境模式
+./start.sh --dev
 
-# 测试指定交易对
-./start.sh --test --symbols ETHUSDT
+# 生产环境模式
+./start.sh --prod
+
+# 生产环境后台运行
+./start.sh --prod --background
 
 # 详细输出模式
 ./start.sh --verbose

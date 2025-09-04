@@ -27,10 +27,11 @@ fi
 # =============================================================================
 
 # 默认参数
-RUN_MODE="foreground"  # foreground, background, test
+RUN_MODE="foreground"  # foreground, background
 TEST_SYMBOLS="BTCUSDT"
 SHOW_HELP=false
 VERBOSE=false
+ENV_MODE=""  # dev for development environment, prod for production environment
 
 # 解析命令行参数
 parse_arguments() {
@@ -40,17 +41,18 @@ parse_arguments() {
                 RUN_MODE="background"
                 shift
                 ;;
-            --test|-t)
-                RUN_MODE="test"
-                if [[ $# -gt 1 && $2 != -* ]]; then
-                    TEST_SYMBOLS="$2"
-                    shift
-                fi
-                shift
-                ;;
+
             --verbose|-v)
                 VERBOSE=true
                 DEBUG=true
+                shift
+                ;;
+            --dev|-dev)
+                ENV_MODE="dev"
+                shift
+                ;;
+            --prod|-prod)
+                ENV_MODE="prod"
                 shift
                 ;;
             --help|-h)
@@ -87,22 +89,25 @@ show_help() {
 
 选项:
     --background, -bg     后台运行模式
-    --test, -t [SYMBOLS]  测试模式，可选择指定交易对 (默认: BTCUSDT)
-    --symbols SYMBOLS     指定测试交易对
+    --dev, -dev          开发环境模式，使用config-dev.yml配置
+    --prod, -prod        生产环境模式，使用config-prod.yml配置
     --verbose, -v         详细输出模式
     --help, -h           显示此帮助信息
 
 运行模式:
     前台模式 (默认):     ./start.sh
     后台模式:           ./start.sh --background
-    测试模式:           ./start.sh --test
-    测试指定交易对:      ./start.sh --test --symbols ETHUSDT
+
+环境模式:
+    开发环境:           ./start.sh --dev
+    生产环境:           ./start.sh --prod
 
 示例:
-    ./start.sh                          # 前台运行
-    ./start.sh --background             # 后台运行
-    ./start.sh --test                   # 测试模式 (BTCUSDT)
-    ./start.sh --test --symbols ETHUSDT # 测试指定交易对
+    ./start.sh                          # 前台运行 (默认配置)
+    ./start.sh --background             # 后台运行 (默认配置)
+    ./start.sh --dev                    # 开发环境模式
+    ./start.sh --prod                   # 生产环境模式
+    ./start.sh --prod --background      # 生产环境后台运行
     ./start.sh --verbose               # 详细输出模式
 
 EOF
@@ -115,12 +120,6 @@ EOF
 # 构建命令行参数
 build_command_args() {
     local args="-cmd=run -config=$CONFIG_FILE"
-    
-    # 测试模式的特殊参数
-    if [ "$RUN_MODE" = "test" ]; then
-        args="$args -symbols=$TEST_SYMBOLS"
-    fi
-    
     echo "$args"
 }
 
@@ -135,13 +134,8 @@ perform_startup_checks() {
     if [ -n "$running_pids" ]; then
         log_warn "发现运行中的实例: $running_pids"
         
-        if [ "$RUN_MODE" != "test" ]; then
-            log_info "停止现有实例以避免冲突..."
-            stop_existing_processes
-        else
-            log_error "测试模式不允许与现有实例并行运行"
-            return 1
-        fi
+        log_info "停止现有实例以避免冲突..."
+        stop_existing_processes
     fi
     
     return 0
@@ -158,9 +152,6 @@ main_startup() {
             ;;
         "background")
             start_background_mode $cmd_args
-            ;;
-        "test")
-            start_test_mode "$TEST_SYMBOLS"
             ;;
         *)
             log_error "未知的运行模式: $RUN_MODE"
@@ -187,6 +178,17 @@ main() {
     if [ "$VERBOSE" = "true" ]; then
         DEBUG=true
         log_debug "启用详细输出模式"
+    fi
+    
+    # 设置环境模式
+    if [ "$ENV_MODE" = "dev" ]; then
+        export APP_ENV=development
+        CONFIG_FILE="config-dev.yml"
+        log_info "开发环境模式: 使用 $CONFIG_FILE 配置文件"
+    elif [ "$ENV_MODE" = "prod" ]; then
+        export APP_ENV=production
+        CONFIG_FILE="config-prod.yml"
+        log_info "生产环境模式: 使用 $CONFIG_FILE 配置文件"
     fi
     
     # 显示启动信息

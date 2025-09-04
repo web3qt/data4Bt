@@ -1,0 +1,101 @@
+# 开发环境配置文件
+# 适用于本地开发环境，优化开发体验和调试便利性
+
+# 日志配置 - 开发环境使用详细日志
+log:
+  level: "debug"          # 开发环境使用debug级别，便于调试
+  format: "text"          # 使用文本格式，便于阅读
+  output: "console"       # 输出到控制台
+  file_path: "logs/dev.log"  # 可选：同时输出到文件
+
+# 币安数据源配置
+binance:
+  base_url: "https://data.binance.vision"
+  data_path: "/data/spot/daily/klines"
+  symbols_filter: "USDT"   # 开发环境可以限制为USDT交易对
+  interval: "1m"
+  timeout: 30s
+  retry_count: 3
+  retry_delay: 5s
+  proxy_url: ""            # 开发环境可能需要代理
+
+# 下载器配置 - 开发环境使用较低并发
+downloader:
+  concurrency: 3           # 较低并发，避免对开发机器造成压力
+  buffer_size: 50
+  user_agent: "BinanceDataLoader-Dev/1.0"
+  enable_compression: true
+  max_file_size: "50MB"    # 开发环境限制文件大小
+
+# 解析器配置 - 开发环境使用较低并发
+parser:
+  concurrency: 2           # 较低并发
+  buffer_size: 25
+  validate_data: true      # 开发环境启用数据验证
+  skip_invalid_rows: false # 开发环境不跳过无效行，便于发现问题
+
+# 数据库配置 - 开发环境
+database:
+  clickhouse:
+    hosts: ["localhost:9000"]  # 本地ClickHouse实例
+    database: "data4BT_dev"    # 开发环境数据库
+    username: "default"
+    password: "123456"         # 开发环境密码
+    settings:
+      max_memory_usage: 1000000000  # 1GB内存限制
+      max_threads: 4
+    compression: "lz4"
+    dial_timeout: 30s
+    max_open_conns: 5        # 较少连接数
+    max_idle_conns: 2
+    conn_max_lifetime: 5m
+
+# 导入器配置 - 开发环境使用小批次
+importer:
+  batch_size: 1000         # 较小批次，便于调试
+  buffer_size: 10
+  flush_interval: 10s      # 较短刷新间隔
+  enable_deduplication: true
+
+# 状态管理配置
+state:
+  storage_type: "file"
+  file_path: "state/dev_progress.json"  # 开发环境状态文件
+  backup_count: 3
+  save_interval: 5s        # 较短保存间隔
+
+# 物化视图配置
+materialized_views:
+  enabled: true
+  intervals: ["5m", "15m", "1h"]  # 开发环境减少间隔类型
+  refresh_interval: 30s    # 较短刷新间隔，便于测试
+  parallel_refresh: false  # 开发环境禁用并行刷新
+
+# 监控配置 - 开发环境启用详细监控
+monitoring:
+  enabled: true
+  metrics_port: 8080
+  health_check_port: 8081
+  progress_report_interval: 10s  # 较短报告间隔
+  web_dashboard:
+    enabled: true
+    port: 8890
+    auto_start: true
+    refresh_interval: 5s     # 较短刷新间隔
+    show_worker_status: true
+    show_realtime_progress: true
+
+# 调度器配置 - 开发环境
+scheduler:
+  end_date: ""             # 开发环境通常使用当前日期
+  batch_days: 1            # 较小批次
+  max_concurrent_symbols: 2  # 较少并发符号
+  timeline_cache_duration: 1h
+  auto_discover_symbols: true
+  show_startup_overview: true
+
+# 开发环境特定配置
+# 可以通过环境变量覆盖：
+# export BDL_LOG_LEVEL=trace
+# export BDL_DATABASE_CLICKHOUSE_DATABASE=data4BT_dev_custom
+# export BDL_DOWNLOADER_CONCURRENCY=1

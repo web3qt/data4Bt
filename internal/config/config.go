@@ -130,8 +130,16 @@ type SchedulerConfig struct {
 	ShowStartupOverview   bool          `mapstructure:"show_startup_overview"`
 }
 
-// Load 加载配置文件
+// Load 加载配置文件 - 增强版本，支持多环境配置
+// 保持向后兼容性，同时支持环境检测和智能配置选择
 func Load(configPath string) (*Config, error) {
+	// 使用增强的配置加载器
+	loader := NewEnhancedConfigLoader()
+	return loader.LoadConfig(configPath)
+}
+
+// LoadLegacy 原始的配置加载函数，保留用于兼容性测试
+func LoadLegacy(configPath string) (*Config, error) {
 	v := viper.New()
 	
 	// 设置配置文件路径和名称
