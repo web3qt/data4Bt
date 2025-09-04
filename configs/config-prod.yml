@@ -40,8 +40,8 @@ database:
     hosts: 
       - "localhost:9000"  # 本地开发环境，生产环境请修改为实际地址
     database: "data4BT"
-    username: "default"  # 本地开发环境，生产环境请使用环境变量 ${BDL_DATABASE_USERNAME}
-    password: "123456"         # 本地开发环境，生产环境请使用环境变量 ${BDL_DATABASE_PASSWORD}
+    username: "default"  # 生产环境请修改为实际用户名
+    password: "123456"    # 生产环境请修改为实际密码
     settings:
       max_memory_usage: 4000000000      # 4GB内存限制
       max_threads: 16
@@ -96,37 +96,19 @@ scheduler:
   auto_discover_symbols: true
   show_startup_overview: false  # 生产环境不显示启动概览
 
-# 生产环境安全和性能注意事项：
+# 生产环境配置说明：
 #
-# 1. 敏感信息管理：
-#    - 数据库密码通过环境变量提供：BDL_DATABASE_PASSWORD
-#    - API密钥通过环境变量提供：BDL_API_KEY
-#    - 不要在配置文件中硬编码敏感信息
+# 1. 安全配置：
+#    - 修改数据库用户名和密码为生产环境实际值
+#    - 配置实际的数据库服务器地址
+#    - 移除或配置代理设置
 #
-# 2. 资源限制：
+# 2. 性能调优：
 #    - 根据服务器规格调整并发数和内存限制
 #    - 监控系统资源使用情况
-#    - 设置适当的超时和重试策略
-#
-# 3. 监控和告警：
-#    - 启用详细的性能监控
-#    - 配置日志聚合和分析
-#    - 设置关键指标的告警阈值
-#
-# 4. 高可用性：
-#    - 配置多个ClickHouse节点
-#    - 实施数据备份策略
-#    - 配置故障转移机制
-#
-# 5. 性能优化：
 #    - 根据数据量调整批次大小
-#    - 优化数据库连接池配置
-#    - 监控和调整并发参数
-
-# 生产环境环境变量示例：
-# export BDL_DATABASE_USERNAME=prod_user
-# export BDL_DATABASE_PASSWORD=secure_password_here
-# export BDL_LOG_LEVEL=warn
-# export BDL_DOWNLOADER_CONCURRENCY=20
-# export BDL_PARSER_CONCURRENCY=10
-# export BDL_IMPORTER_BATCH_SIZE=50000
+#
+# 3. 监控配置：
+#    - 配置日志文件路径和轮转策略
+#    - 设置监控端口和健康检查
+#    - 配置告警阈值

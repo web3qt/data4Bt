@@ -8,9 +8,8 @@ import (
 	"github.com/spf13/viper"
 )
 
-// EnhancedConfigLoader provides enhanced configuration loading with environment detection
+// EnhancedConfigLoader provides enhanced configuration loading
 type EnhancedConfigLoader struct {
-	envDetector    *EnvironmentDetectorRegistry
 	configSelector ConfigSelector
 	viper         *viper.Viper
 	debugMode     bool
@@ -19,10 +18,9 @@ type EnhancedConfigLoader struct {
 // NewEnhancedConfigLoader creates a new enhanced config loader
 func NewEnhancedConfigLoader() *EnhancedConfigLoader {
 	return &EnhancedConfigLoader{
-		envDetector:    NewEnvironmentDetectorRegistry(),
 		configSelector: NewDefaultConfigSelector(),
 		viper:         viper.New(),
-		debugMode:     os.Getenv("BDL_DEBUG") != "",
+		debugMode:     false, // 简化调试模式
 	}
 }
 
@@ -61,7 +59,7 @@ func (l *EnhancedConfigLoader) LoadConfig(configPath string) (*Config, error) {
 	return config, nil
 }
 
-// detectEnvironment detects the current environment
+// detectEnvironment detects the current environment from config file path
 func (l *EnhancedConfigLoader) detectEnvironment(configPath string) Environment {
 	// If a specific config file is provided, try to determine environment from filename
 	if configPath != "" {
@@ -73,13 +71,11 @@ func (l *EnhancedConfigLoader) detectEnvironment(configPath string) Environment 
 		}
 	}
 
-	// Use environment detector registry
-	detectedEnv := l.envDetector.DetectEnvironment()
+	// Default to development environment
 	if l.debugMode {
-		log.Printf("[DEBUG] Environment detected by registry: %s", detectedEnv)
+		log.Printf("[DEBUG] Using default development environment")
 	}
-
-	return detectedEnv
+	return EnvDevelopment
 }
 
 // selectConfigFile selects the appropriate configuration file
@@ -99,14 +95,10 @@ func (l *EnhancedConfigLoader) selectConfigFile(configPath string, env Environme
 	return selectedFile, nil
 }
 
-// loadAndMergeConfig loads configuration from file and applies environment variable overrides
+// loadAndMergeConfig loads configuration from file
 func (l *EnhancedConfigLoader) loadAndMergeConfig(configFile string) (*Config, error) {
 	// Reset viper instance
 	l.viper = viper.New()
-
-	// Set environment variable configuration
-	l.viper.SetEnvPrefix("BDL")
-	l.viper.AutomaticEnv()
 
 	// Set default values
 	setDefaults(l.viper)
@@ -137,8 +129,6 @@ func (l *EnhancedConfigLoader) loadAndMergeConfig(configFile string) (*Config, e
 
 // GetConfigInfo returns information about the current configuration setup
 func (l *EnhancedConfigLoader) GetConfigInfo() (*ConfigInfo, error) {
-	env := l.envDetector.DetectEnvironment()
-	
 	// Type assert to DefaultConfigSelector to access specific methods
 	defaultSelector, ok := l.configSelector.(*DefaultConfigSelector)
 	if !ok {
@@ -151,7 +141,7 @@ func (l *EnhancedConfigLoader) GetConfigInfo() (*ConfigInfo, error) {
 	}
 
 	return &ConfigInfo{
-		DetectedEnvironment: env,
+		DetectedEnvironment: EnvDevelopment, // 默认开发环境
 		AvailableConfigs:    availableConfigs,
 		SearchPaths:         defaultSelector.GetSearchPaths(),
 	}, nil

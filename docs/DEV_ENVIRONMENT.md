@@ -83,36 +83,26 @@
 # 或者使用 Ctrl+C (前台运行时)
 ```
 
-## 环境变量
+## 配置管理
 
-### 开发环境
+### 配置文件优先
 
-开发环境会自动设置：
-```bash
-export APP_ENV=development
-```
+系统完全基于配置文件工作，无需设置环境变量：
 
-### 生产环境
+- **开发环境**: `configs/config-dev.yml`
+- **生产环境**: `configs/config-prod.yml`
+- **默认配置**: `config.yml`
 
-生产环境会自动设置：
-```bash
-export APP_ENV=production
-```
+### 配置文件修改
 
-### 生产环境必需的环境变量
-
-生产环境需要设置以下敏感信息：
+直接编辑对应的配置文件即可：
 
 ```bash
-# 数据库连接信息
-export BDL_DATABASE_USERNAME=prod_user
-export BDL_DATABASE_PASSWORD=secure_password_here
+# 修改开发环境配置
+vim configs/config-dev.yml
 
-# 可选的性能调优参数
-export BDL_LOG_LEVEL=warn
-export BDL_DOWNLOADER_CONCURRENCY=20
-export BDL_PARSER_CONCURRENCY=10
-export BDL_IMPORTER_BATCH_SIZE=50000
+# 修改生产环境配置
+vim configs/config-prod.yml
 ```
 
 ## 配置差异对比
@@ -177,11 +167,13 @@ export BDL_IMPORTER_BATCH_SIZE=50000
    cp configs/config-prod.yml.example configs/config-prod.yml
    ```
 
-2. **环境变量未设置**:
+2. **配置文件错误**:
    ```bash
-   # 检查环境变量
-   echo $APP_ENV
-   echo $BDL_DATABASE_PASSWORD
+   # 检查配置文件是否存在
+   ls -la configs/
+   
+   # 验证配置文件格式
+   go run cmd/main.go -config=configs/config-dev.yml -cmd=validate
    ```
 
 3. **端口冲突**:
