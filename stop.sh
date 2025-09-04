@@ -149,13 +149,13 @@ stop_data4bt() {
     fi
 }
 
-# 检查ClickHouse容器状态
+# 检查ClickHouse容器状态（仅显示信息，不进行任何操作）
 check_clickhouse_container() {
     if ! check_docker; then
         return 0
     fi
     
-    log_info "检查ClickHouse容器状态..."
+    log_info "检查ClickHouse容器状态（仅供参考）..."
     
     local container_ids
     container_ids=$(docker ps -q --filter "name=clickhouse" --filter "status=running" 2>/dev/null || true)
@@ -174,8 +174,9 @@ check_clickhouse_container() {
             fi
         done <<< "$container_ids"
         
-        log_info "ClickHouse容器保持运行状态（可能被其他项目使用）"
-        log_info "如需停止ClickHouse容器，请手动执行: docker stop <container_id>"
+        log_info "⚠️  重要提醒：ClickHouse容器保持运行状态（可能被其他项目使用）"
+        log_info "🔒 安全保护：本脚本不会停止任何Docker容器"
+        log_info "💡 如需停止ClickHouse容器，请手动执行: docker stop <container_id>"
     else
         log_info "未发现运行中的ClickHouse容器"
     fi
@@ -214,11 +215,12 @@ show_completion_info() {
     echo ""
     echo "📝 提示:"
     echo "   重新启动:     ./start.sh"
+    echo "   生产环境:     ./start.sh --prod"
     echo "   查看状态:     docker ps"
-    echo "   清空数据库:   ./clear_database.sh"
     echo "   查看帮助:     $0 --help"
     echo ""
-    echo "💡 如果需要完全重置环境，请运行清空数据库脚本"
+    echo "🔒 安全提醒: 本脚本只停止Data4BT相关进程，不影响其他服务"
+    echo "💡 ClickHouse等共享服务保持运行状态，确保其他项目正常工作"
     echo ""
 }
 

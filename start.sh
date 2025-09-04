@@ -180,15 +180,18 @@ main() {
         log_debug "启用详细输出模式"
     fi
     
-    # 设置配置文件
+    # 设置配置文件和导出环境变量
     if [ "$ENV_MODE" = "dev" ]; then
         CONFIG_FILE="configs/config-dev.yml"
+        export ENV_MODE="dev"
         log_info "开发环境模式: 使用 $CONFIG_FILE 配置文件"
     elif [ "$ENV_MODE" = "prod" ]; then
         CONFIG_FILE="configs/config-prod.yml"
+        export ENV_MODE="prod"
         log_info "生产环境模式: 使用 $CONFIG_FILE 配置文件"
     else
         CONFIG_FILE="config.yml"
+        export ENV_MODE="default"
         log_info "默认模式: 使用 $CONFIG_FILE 配置文件"
     fi
     

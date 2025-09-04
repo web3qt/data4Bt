@@ -79,11 +79,11 @@ show_status() {
 # 环境检查函数
 # =============================================================================
 
-# 检查必要的命令是否存在
-check_required_commands() {
+# 检查必要的命令是否存在（简化版）
+check_required_commands_simple() {
     log_info "检查必要的命令..."
     
-    local core_commands=("go" "curl" "pgrep" "pkill")
+    local core_commands=("go" "curl")
     local missing_commands=()
     
     # 检查核心命令
@@ -98,11 +98,13 @@ check_required_commands() {
         return 1
     fi
     
-    # Docker检查单独处理
-    check_docker_environment
-    
     show_status "✅" "所有必要命令已安装"
     return 0
+}
+
+# 检查必要的命令是否存在（保持向后兼容）
+check_required_commands() {
+    check_required_commands_simple
 }
 
 # 检查Docker环境
@@ -111,6 +113,11 @@ check_docker_environment() {
     
     # 检查Docker是否安装
     if ! command -v docker >/dev/null 2>&1; then
+        # 在生产环境模式下，Docker不是必需的
+        if [ "${ENV_MODE:-}" = "prod" ]; then
+            log_info "生产环境模式：跳过Docker检查"
+            return 0
+        fi
         log_warn "Docker未安装"
         offer_docker_installation
         return 1
@@ -118,6 +125,12 @@ check_docker_environment() {
     
     # 检查Docker服务是否运行
     if ! docker info >/dev/null 2>&1; then
+        # 在生产环境模式下，尝试更宽松的检测
+        if [ "${ENV_MODE:-}" = "prod" ]; then
+            log_info "生产环境模式：Docker服务检测失败，但继续执行"
+            log_debug "Docker info命令失败，可能是权限问题或服务配置问题"
+            return 0
+        fi
         log_warn "Docker服务未运行"
         log_info "请启动Docker服务:"
         echo "  - macOS: 启动Docker Desktop"
@@ -126,11 +139,13 @@ check_docker_environment() {
         return 1
     fi
     
-    # 检查Docker Compose
-    if ! command -v docker-compose >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1; then
-        log_warn "Docker Compose未安装"
-        offer_docker_compose_installation
-        return 1
+    # 检查Docker Compose（仅在非生产环境）
+    if [ "${ENV_MODE:-}" != "prod" ]; then
+        if ! command -v docker-compose >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1; then
+            log_warn "Docker Compose未安装"
+            offer_docker_compose_installation
+            return 1
+        fi
     fi
     
     show_status "✅" "Docker环境正常"
@@ -238,45 +253,33 @@ check_go_environment() {
     return 0
 }
 
-# 检查ClickHouse容器
-check_clickhouse_container() {
-    log_info "检查ClickHouse容器..."
+# 检查ClickHouse连接（简化版，不管理容器）
+check_clickhouse_connection() {
+    log_info "检查ClickHouse连接..."
     
-    # 首先检查Docker是否可用
-    if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-        log_error "Docker不可用，无法检查ClickHouse容器"
-        log_info "请先确保Docker已安装并运行"
-        return 1
-    fi
-    
-    local container_name=""
-    
-    # 检查新容器（优先级最高）
-    if docker ps --format "table {{.Names}}" 2>/dev/null | grep -q "data4bt-clickhouse"; then
-        container_name="data4bt-clickhouse"
-        log_debug "发现data4bt-clickhouse容器"
-    # 检查共享容器
-    elif docker ps --format "table {{.Names}}" 2>/dev/null | grep -q "shared-clickhouse"; then
-        container_name="shared-clickhouse"
-        log_debug "发现shared-clickhouse容器"
-    # 检查已停止的容器
-    elif docker ps -a --format "table {{.Names}}\t{{.Status}}" 2>/dev/null | grep -q "data4bt-clickhouse.*Exited"; then
-        log_warn "data4bt-clickhouse容器已停止"
-        return 2  # 特殊返回码表示容器存在但未运行
-    else
-        log_warn "ClickHouse容器未运行"
-        return 1
-    fi
-    
-    # 测试连接
-    if test_clickhouse_connection "$container_name"; then
-        show_status "✅" "ClickHouse容器运行正常 ($container_name)"
-        echo "$container_name"
+    # 尝试通过HTTP接口测试连接
+    if test_clickhouse_direct_connection; then
+        show_status "✅" "ClickHouse服务连接正常"
         return 0
-    else
-        log_error "ClickHouse容器连接失败"
-        return 1
     fi
+    
+    log_warn "ClickHouse连接失败"
+    return 1
+}
+
+# 检查ClickHouse容器（保持向后兼容，但简化逻辑）
+check_clickhouse_container() {
+    log_info "检查ClickHouse服务..."
+    
+    # 直接尝试连接测试
+    if test_clickhouse_direct_connection; then
+        show_status "✅" "ClickHouse服务连接正常（直接连接）"
+        echo "direct-connection"
+        return 0
+    fi
+    
+    log_warn "ClickHouse连接失败，程序启动后将重试"
+    return 1
 }
 
 # 测试ClickHouse连接
@@ -296,111 +299,68 @@ test_clickhouse_connection() {
         if docker exec "$container_name" clickhouse-client --query "SELECT 1" >/dev/null 2>&1; then
             return 0
         fi
+    else
+        # 其他容器，尝试多种认证方式
+        if docker exec "$container_name" clickhouse-client --query "SELECT 1" >/dev/null 2>&1; then
+            return 0
+        elif docker exec "$container_name" clickhouse-client --user=default --password=123456 --query "SELECT 1" >/dev/null 2>&1; then
+            return 0
+        elif docker exec "$container_name" clickhouse-client --user=default --password="" --query "SELECT 1" >/dev/null 2>&1; then
+            return 0
+        fi
     fi
     
     return 1
 }
 
-# 启动ClickHouse容器
-start_clickhouse_container() {
-    log_info "启动ClickHouse容器..."
+# 测试ClickHouse直接连接（用于生产环境）
+test_clickhouse_direct_connection() {
+    log_debug "测试ClickHouse直接连接"
     
-    # 检查Docker是否可用
-    if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-        log_error "Docker不可用，无法启动ClickHouse容器"
-        offer_docker_installation
-        return 1
-    fi
-    
-    # 检查是否有已停止的容器可以重启
-    if docker ps -a --format "table {{.Names}}\t{{.Status}}" 2>/dev/null | grep -q "data4bt-clickhouse.*Exited"; then
-        log_info "发现已停止的data4bt-clickhouse容器，正在重启..."
-        if docker start data4bt-clickhouse; then
-            wait_for_clickhouse_startup "data4bt-clickhouse"
-            return $?
-        else
-            log_warn "容器重启失败，尝试重新创建"
-            docker rm -f data4bt-clickhouse 2>/dev/null || true
-        fi
-    fi
-    
-    # 首先尝试使用智能启动脚本
-    if [ -f "./start_clickhouse.sh" ]; then
-        log_debug "使用智能启动脚本"
-        if ./start_clickhouse.sh auto; then
-            wait_for_clickhouse_startup "data4bt-clickhouse"
-            return $?
-        fi
-    fi
-    
-    # 尝试使用docker-compose
-    if [ -f "docker-compose.yml" ]; then
-        log_debug "使用docker-compose启动"
-        if docker-compose up -d clickhouse 2>/dev/null || docker compose up -d clickhouse 2>/dev/null; then
-            wait_for_clickhouse_startup "data4bt-clickhouse"
-            return $?
-        fi
-    fi
-    
-    # 最后尝试直接运行容器
-    log_info "尝试直接启动ClickHouse容器..."
-    if start_clickhouse_directly; then
-        wait_for_clickhouse_startup "data4bt-clickhouse"
-        return $?
-    fi
-    
-    log_error "ClickHouse启动失败，请检查Docker环境和配置"
-    return 1
-}
-
-# 等待ClickHouse启动完成
-wait_for_clickhouse_startup() {
-    local container_name="$1"
-    local max_wait=60
-    local wait_count=0
-    
-    log_info "等待ClickHouse启动 (最多等待${max_wait}秒)..."
-    
-    while [ $wait_count -lt $max_wait ]; do
-        if test_clickhouse_connection "$container_name"; then
-            show_status "✅" "ClickHouse启动成功"
+    # 尝试通过HTTP接口测试连接
+    if command -v curl >/dev/null 2>&1; then
+        # 尝试连接8123端口（HTTP接口）
+        if curl -s --connect-timeout 5 "http://localhost:8123/ping" >/dev/null 2>&1; then
+            log_debug "ClickHouse HTTP接口连接成功 (localhost:8123)"
             return 0
         fi
         
-        # 每10秒显示一次进度
-        if [ $((wait_count % 10)) -eq 0 ] && [ $wait_count -gt 0 ]; then
-            log_info "等待中... (${wait_count}/${max_wait}秒)"
+        # 尝试连接外部地址
+        if curl -s --connect-timeout 5 "http://www.linklayer.ai:8123/ping" >/dev/null 2>&1; then
+            log_debug "ClickHouse HTTP接口连接成功 (www.linklayer.ai:8123)"
+            return 0
         fi
-        
-        sleep 2
-        wait_count=$((wait_count + 2))
-    done
+    fi
     
-    log_error "ClickHouse启动超时"
+    # 尝试使用clickhouse-client（如果可用）
+    if command -v clickhouse-client >/dev/null 2>&1; then
+        if clickhouse-client --host=localhost --port=9000 --query="SELECT 1" >/dev/null 2>&1; then
+            log_debug "ClickHouse客户端连接成功 (localhost:9000)"
+            return 0
+        fi
+    fi
     
-    # 显示容器日志帮助诊断
-    log_info "显示容器日志 (最后20行):"
-    docker logs --tail 20 "$container_name" 2>/dev/null || true
-    
+    log_debug "ClickHouse直接连接失败"
     return 1
 }
 
-# 直接启动ClickHouse容器
+# 启动ClickHouse容器（已禁用 - 生产环境安全）
+start_clickhouse_container() {
+    log_warn "容器管理功能已禁用，请确保ClickHouse服务已手动启动"
+    log_info "程序将尝试连接配置文件中指定的ClickHouse服务"
+    return 1
+}
+
+# 等待ClickHouse启动完成（已禁用 - 生产环境安全）
+wait_for_clickhouse_startup() {
+    log_warn "容器管理功能已禁用"
+    return 1
+}
+
+# 直接启动ClickHouse容器（已禁用 - 生产环境安全）
 start_clickhouse_directly() {
-    log_info "直接启动基础ClickHouse容器..."
-    
-    # 创建基本的ClickHouse容器
-    docker run -d \
-        --name data4bt-clickhouse \
-        --restart unless-stopped \
-        -p 8123:8123 \
-        -p 9000:9000 \
-        -e CLICKHOUSE_DB=data4BT \
-        -e CLICKHOUSE_USER=default \
-        -e CLICKHOUSE_PASSWORD=123456 \
-        clickhouse/clickhouse-server:23.8-alpine
-    
-    return $?
+    log_warn "容器创建功能已禁用，请手动确保ClickHouse服务运行"
+    return 1
 }
 
 # 检查网络连接
@@ -859,8 +819,8 @@ start_test_mode() {
 perform_environment_check() {
     log_info "开始环境检查..."
     
-    # 检查必要命令
-    if ! check_required_commands; then
+    # 检查必要命令（简化版，不强制要求Docker）
+    if ! check_required_commands_simple; then
         log_error "基础命令检查失败，请先安装必要的软件"
         return 1
     fi
@@ -877,45 +837,13 @@ perform_environment_check() {
         return 1
     fi
     
-    # 检查ClickHouse
-    local clickhouse_result
-    local clickhouse_container=""
-    
-    clickhouse_result=$(check_clickhouse_container 2>&1)
-    local check_exit_code=$?
-    
-    case $check_exit_code in
-        0)
-            # 容器运行正常
-            clickhouse_container=$(echo "$clickhouse_result" | tail -n 1)
-            log_info "使用现有ClickHouse容器: $clickhouse_container"
-            ;;
-        2)
-            # 容器存在但已停止
-            log_info "ClickHouse容器已停止，尝试启动..."
-            if start_clickhouse_container; then
-                log_success "ClickHouse容器已启动"
-            else
-                log_error "ClickHouse容器启动失败"
-                return 1
-            fi
-            ;;
-        1)
-            # 容器不存在或其他问题
-            log_warn "ClickHouse容器未运行，尝试启动..."
-            if start_clickhouse_container; then
-                log_success "ClickHouse容器已启动"
-            else
-                log_error "ClickHouse启动失败"
-                show_clickhouse_help
-                return 1
-            fi
-            ;;
-        *)
-            log_error "ClickHouse检查出现异常"
-            return 1
-            ;;
-    esac
+    # 检查ClickHouse连接（简化版，不管理容器）
+    if check_clickhouse_connection; then
+        log_info "ClickHouse服务连接正常"
+    else
+        log_warn "ClickHouse连接测试失败，程序启动后将重试连接"
+        log_info "请确保ClickHouse服务正在运行并且配置正确"
+    fi
     
     # 检查网络连接
     check_network_connectivity || true  # 网络失败不阻止启动
@@ -924,31 +852,25 @@ perform_environment_check() {
     return 0
 }
 
-# 显示ClickHouse帮助信息
+# 显示ClickHouse帮助信息（简化版）
 show_clickhouse_help() {
     echo ""
-    log_info "ClickHouse启动失败，可能的解决方案:"
+    log_info "ClickHouse连接失败，可能的解决方案:"
     echo ""
-    echo "1. 🐳 检查Docker环境:"
-    echo "   docker --version"
-    echo "   docker info"
+    echo "1. 📝 检查配置文件:"
+    echo "   确保 configs/config-*.yml 中的ClickHouse配置正确"
+    echo "   检查主机地址、端口、用户名和密码"
     echo ""
-    echo "2. 🔧 手动启动ClickHouse:"
-    echo "   docker-compose up -d clickhouse"
-    echo "   # 或"
-    echo "   ./start_clickhouse.sh"
+    echo "2. 🔍 检查ClickHouse服务状态:"
+    echo "   curl http://localhost:8123/ping"
+    echo "   # 或检查您配置的ClickHouse地址"
     echo ""
-    echo "3. 📝 检查配置文件:"
-    echo "   确保 docker-compose.yml 存在"
-    echo "   确保 docker/clickhouse/ 目录存在"
+    echo "3. 🔧 确保ClickHouse服务运行:"
+    echo "   请联系系统管理员确保ClickHouse服务正常运行"
+    echo "   或检查现有的Docker容器状态"
     echo ""
-    echo "4. 🔍 查看详细日志:"
-    echo "   docker logs data4bt-clickhouse"
-    echo ""
-    echo "5. 🆘 重置环境:"
-    echo "   docker-compose down"
-    echo "   docker system prune -f"
-    echo "   docker-compose up -d clickhouse"
+    echo "4. 🌐 网络连接检查:"
+    echo "   确保网络连接正常，防火墙设置正确"
     echo ""
 }
 
