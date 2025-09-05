@@ -127,43 +127,121 @@ func (dvc *databaseVerificationChecker) VerifyBatchSymbols(ctx context.Context, 
 	}()
 	
 	dvc.logger.Info().
-		Strs("symbols", symbols).
 		Int("symbols_count", len(symbols)).
 		Msg("开始批量验证交易对数据完整性")
+	
+	// 使用批量分析优化性能 - 单次查询获取所有交易对的数据范围
+	dvc.logger.Info().Msg("🔍 批量分析交易对数据范围...")
+	dataRanges, err := dvc.rangeAnalyzer.AnalyzeBatchSymbolRanges(ctx, symbols)
+	if err != nil {
+		return nil, fmt.Errorf("failed to analyze batch symbol ranges: %w", err)
+	}
 	
 	var reports []*DatabaseVerificationReport
 	verifiedSymbols := 0
 	
-	// 逐个验证交易对
-	for i, symbol := range symbols {
-		dvc.logger.Debug().
-			Str("symbol", symbol).
-			Int("current", i+1).
-			Int("total", len(symbols)).
-			Msg("验证交易对")
-		
-		report, err := dvc.VerifySymbolData(ctx, symbol, startDate, endDate)
-		if err != nil {
-			dvc.logger.Error().
-				Str("symbol", symbol).
-				Err(err).
-				Msg("验证交易对失败")
-			// 创建一个错误报告而不是完全失败
-			report = &DatabaseVerificationReport{
-				Symbol:                symbol,
-				DataRange:            &SymbolDataRange{Symbol: symbol, HasData: false},
-				MonthlyReports:       []*MonthlyCompletenessReport{},
-				OverallCompleteness:  0.0,
-				MissingMonths:        []string{},
-				IncompleteMonths:     []string{},
-				QualityScore:         0.0,
-				GeneratedAt:          time.Now(),
-			}
-		} else {
-			verifiedSymbols++
+	// 分批处理交易对以显示进度并控制内存使用
+	batchSize := 50 // 每批处理50个交易对
+	totalBatches := (len(symbols) + batchSize - 1) / batchSize
+	
+	for batchIdx := 0; batchIdx < totalBatches; batchIdx++ {
+		start := batchIdx * batchSize
+		end := start + batchSize
+		if end > len(symbols) {
+			end = len(symbols)
 		}
 		
-		reports = append(reports, report)
+		batchSymbols := symbols[start:end]
+		dvc.logger.Info().
+			Int("batch", batchIdx+1).
+			Int("total_batches", totalBatches).
+			Int("batch_size", len(batchSymbols)).
+			Msg("🔄 处理批次")
+		
+		// 处理当前批次中的每个交易对
+		for i, symbol := range batchSymbols {
+			currentIndex := start + i + 1
+			
+			dvc.logger.Debug().
+				Str("symbol", symbol).
+				Int("current", currentIndex).
+				Int("total", len(symbols)).
+				Msg("验证交易对")
+			
+			// 从批量分析结果中获取数据范围
+			dataRange, exists := dataRanges[symbol]
+			if !exists {
+				dvc.logger.Warn().
+					Str("symbol", symbol).
+					Msg("未找到交易对数据范围信息")
+				
+				// 创建空数据范围
+				dataRange = &SymbolDataRange{
+					Symbol:  symbol,
+					HasData: false,
+				}
+			}
+			
+			var report *DatabaseVerificationReport
+			
+			// 如果没有数据，创建空报告
+			if !dataRange.HasData {
+				report = &DatabaseVerificationReport{
+					Symbol:                symbol,
+					DataRange:            dataRange,
+					MonthlyReports:       []*MonthlyCompletenessReport{},
+					OverallCompleteness:  0.0,
+					MissingMonths:        []string{},
+					IncompleteMonths:     []string{},
+					QualityScore:         0.0,
+					GeneratedAt:          time.Now(),
+				}
+			} else {
+				// 有数据的交易对继续完整性分析
+				filteredMonths := dvc.rangeAnalyzer.FilterMonthsByDateRange(dataRange.MonthList, startDate, endDate)
+				
+				monthlyReports, err := dvc.completenessAnalyzer.AnalyzeMonthlyCompleteness(ctx, symbol, filteredMonths)
+				if err != nil {
+					dvc.logger.Error().
+						Str("symbol", symbol).
+						Err(err).
+						Msg("分析月度完整性失败")
+					
+					// 创建错误报告
+					report = &DatabaseVerificationReport{
+						Symbol:                symbol,
+						DataRange:            dataRange,
+						MonthlyReports:       []*MonthlyCompletenessReport{},
+						OverallCompleteness:  0.0,
+						MissingMonths:        []string{},
+						IncompleteMonths:     []string{},
+						QualityScore:         0.0,
+						GeneratedAt:          time.Now(),
+					}
+				} else {
+					// 计算完整性指标
+					overallCompleteness := dvc.completenessAnalyzer.CalculateOverallCompleteness(monthlyReports)
+					missingMonths := dvc.completenessAnalyzer.IdentifyMissingMonths(monthlyReports)
+					incompleteMonths := dvc.completenessAnalyzer.IdentifyIncompleteMonths(monthlyReports)
+					qualityScore := overallCompleteness
+					
+					report = &DatabaseVerificationReport{
+						Symbol:                symbol,
+						DataRange:            dataRange,
+						MonthlyReports:       monthlyReports,
+						OverallCompleteness:  overallCompleteness,
+						MissingMonths:        missingMonths,
+						IncompleteMonths:     incompleteMonths,
+						QualityScore:         qualityScore,
+						GeneratedAt:          time.Now(),
+					}
+					
+					verifiedSymbols++
+				}
+			}
+			
+			reports = append(reports, report)
+		}
 	}
 	
 	// 计算批量统计信息

@@ -197,6 +197,107 @@ func (r *Repository) GetFirstDate(ctx context.Context, symbol string) (time.Time
 	return firstDate, nil
 }
 
+// GetBatchDateRanges 批量获取多个交易对的时间范围
+// 这个方法优化了性能，用单个查询替代多个单独的GetFirstDate和GetLastDate调用
+func (r *Repository) GetBatchDateRanges(ctx context.Context, symbols []string) (map[string]*domain.SymbolDateRange, error) {
+	if len(symbols) == 0 {
+		return make(map[string]*domain.SymbolDateRange), nil
+	}
+	
+	// 创建结果映射
+	results := make(map[string]*domain.SymbolDateRange)
+	
+	// 初始化所有交易对的结果，默认为无数据
+	for _, symbol := range symbols {
+		results[symbol] = &domain.SymbolDateRange{
+			Symbol:  symbol,
+			HasData: false,
+		}
+	}
+	
+	// 构建批量查询SQL
+	// 使用单个查询获取所有交易对的时间范围
+	query := `
+		SELECT 
+			symbol,
+			min(toDate(open_time)) as first_date,
+			max(toDate(open_time)) as last_date,
+			count(*) as record_count
+		FROM klines_1m 
+		WHERE symbol IN (` + r.buildInClause(len(symbols)) + `)
+		GROUP BY symbol
+		HAVING record_count > 0
+	`
+	
+	// 准备查询参数
+	args := make([]interface{}, len(symbols))
+	for i, symbol := range symbols {
+		args[i] = symbol
+	}
+	
+	// 执行查询
+	rows, err := r.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute batch date ranges query: %w", err)
+	}
+	defer rows.Close()
+	
+	// 处理查询结果
+	for rows.Next() {
+		var symbol string
+		var firstDate, lastDate time.Time
+		var recordCount uint64
+		
+		if err := rows.Scan(&symbol, &firstDate, &lastDate, &recordCount); err != nil {
+			r.logger.Warn().Err(err).Str("symbol", symbol).Msg("Failed to scan date range row")
+			continue
+		}
+		
+		// 更新结果
+		if result, exists := results[symbol]; exists {
+			result.FirstDate = firstDate
+			result.LastDate = lastDate
+			result.HasData = recordCount > 0
+		}
+	}
+	
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over date range results: %w", err)
+	}
+	
+	r.logger.Info().
+		Int("requested_symbols", len(symbols)).
+		Int("symbols_with_data", r.countSymbolsWithData(results)).
+		Msg("Batch date ranges query completed")
+	
+	return results, nil
+}
+
+// buildInClause 构建IN子句的占位符
+func (r *Repository) buildInClause(count int) string {
+	if count == 0 {
+		return ""
+	}
+	
+	placeholders := make([]string, count)
+	for i := 0; i < count; i++ {
+		placeholders[i] = "?"
+	}
+	
+	return strings.Join(placeholders, ",")
+}
+
+// countSymbolsWithData 计算有数据的交易对数量
+func (r *Repository) countSymbolsWithData(results map[string]*domain.SymbolDateRange) int {
+	count := 0
+	for _, result := range results {
+		if result.HasData {
+			count++
+		}
+	}
+	return count
+}
+
 // CreateTables 创建数据表
 func (r *Repository) CreateTables(ctx context.Context) error {
 	r.logger.Info().Msg("Creating ClickHouse tables")

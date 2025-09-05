@@ -15,6 +15,9 @@ type DataRangeAnalyzer interface {
 	// AnalyzeSymbolRange 分析交易对数据范围
 	AnalyzeSymbolRange(ctx context.Context, symbol string) (*SymbolDataRange, error)
 	
+	// AnalyzeBatchSymbolRanges 批量分析多个交易对数据范围（性能优化）
+	AnalyzeBatchSymbolRanges(ctx context.Context, symbols []string) (map[string]*SymbolDataRange, error)
+	
 	// GenerateMonthList 生成指定范围内的月份列表
 	GenerateMonthList(startDate, endDate time.Time) []string
 	
@@ -84,6 +87,83 @@ func (dra *dataRangeAnalyzer) AnalyzeSymbolRange(ctx context.Context, symbol str
 		MonthList:    monthList,
 		HasData:      true,
 	}, nil
+}
+
+// AnalyzeBatchSymbolRanges 批量分析多个交易对数据范围（性能优化）
+func (dra *dataRangeAnalyzer) AnalyzeBatchSymbolRanges(ctx context.Context, symbols []string) (map[string]*SymbolDataRange, error) {
+	startTime := time.Now()
+	defer func() {
+		logger.LogPerformance("data_range_analyzer", "analyze_batch_symbol_ranges", time.Since(startTime), map[string]interface{}{
+			"symbols_count": len(symbols),
+		})
+	}()
+	
+	dra.logger.Info().
+		Int("symbols_count", len(symbols)).
+		Msg("开始批量分析交易对数据范围")
+	
+	// 使用批量查询获取时间范围
+	dateRanges, err := dra.repository.GetBatchDateRanges(ctx, symbols)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get batch date ranges: %w", err)
+	}
+	
+	results := make(map[string]*SymbolDataRange)
+	
+	// 转换域对象到验证对象并生成月份列表
+	for symbol, dateRange := range dateRanges {
+		var symbolDataRange *SymbolDataRange
+		
+		if !dateRange.HasData {
+			// 无数据的情况
+			symbolDataRange = &SymbolDataRange{
+				Symbol:       symbol,
+				EarliestDate: time.Time{},
+				LatestDate:   time.Time{},
+				TotalMonths:  0,
+				MonthList:    []string{},
+				HasData:      false,
+			}
+		} else {
+			// 有数据的情况，生成月份列表
+			monthList := dra.GenerateMonthList(dateRange.FirstDate, dateRange.LastDate)
+			
+			symbolDataRange = &SymbolDataRange{
+				Symbol:       symbol,
+				EarliestDate: dateRange.FirstDate,
+				LatestDate:   dateRange.LastDate,
+				TotalMonths:  len(monthList),
+				MonthList:    monthList,
+				HasData:      true,
+			}
+		}
+		
+		results[symbol] = symbolDataRange
+		
+		dra.logger.Debug().
+			Str("symbol", symbol).
+			Bool("has_data", symbolDataRange.HasData).
+			Int("total_months", symbolDataRange.TotalMonths).
+			Msg("交易对数据范围分析完成")
+	}
+	
+	dra.logger.Info().
+		Int("total_symbols", len(symbols)).
+		Int("symbols_with_data", dra.countSymbolsWithData(results)).
+		Msg("批量数据范围分析完成")
+	
+	return results, nil
+}
+
+// countSymbolsWithData 计算有数据的交易对数量
+func (dra *dataRangeAnalyzer) countSymbolsWithData(results map[string]*SymbolDataRange) int {
+	count := 0
+	for _, result := range results {
+		if result.HasData {
+			count++
+		}
+	}
+	return count
 }
 
 // GenerateMonthList 生成指定范围内的月份列表

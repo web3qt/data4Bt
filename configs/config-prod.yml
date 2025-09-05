@@ -43,9 +43,14 @@ database:
     username: "default"  # 生产环境请修改为实际用户名
     password: "qCWtqZzu8Lj2"    # 生产环境请修改为实际密码
     settings:
-      max_memory_usage: 4000000000      # 4GB内存限制
-      max_threads: 16
-      max_execution_time: 3600          # 1小时执行时间限制
+      max_memory_usage: 8000000000      # 8GB内存限制（优化大批量验证）
+      max_threads: 32                   # 增加线程数支持并发查询
+      max_execution_time: 7200          # 2小时执行时间限制（验证大量交易对）
+      max_query_size: 262144000         # 250MB查询大小限制（批量查询优化）
+      max_result_rows: 10000000         # 1000万行结果限制
+      max_result_bytes: 4294967296      # 4GB结果大小限制
+      read_buffer_size: 1048576         # 1MB读缓冲区
+      max_compress_block_size: 1048576  # 1MB压缩块大小
     compression: "lz4"
     dial_timeout: 60s
     max_open_conns: 50       # 生产环境高连接数
@@ -73,6 +78,14 @@ materialized_views:
   refresh_interval: 5m     # 生产环境较长刷新间隔
   parallel_refresh: true   # 生产环境启用并行刷新
 
+# 验证器配置 - 生产环境优化
+verification:
+  batch_size: 50               # 每批处理的交易对数量
+  enable_progress_display: true # 显示处理进度
+  parallel_completeness_check: true # 并行完整性检查
+  timeout: 7200s               # 2小时验证超时
+  memory_optimization: true    # 启用内存优化
+  
 # 监控配置 - 生产环境完整监控
 monitoring:
   enabled: true

@@ -163,6 +163,14 @@ type SymbolInfo struct {
 	UpdatedAt    time.Time `json:"updated_at" db:"updated_at"`         // 更新时间
 }
 
+// SymbolDateRange 表示交易对的时间范围
+type SymbolDateRange struct {
+	Symbol    string    `json:"symbol"`
+	FirstDate time.Time `json:"first_date"`
+	LastDate  time.Time `json:"last_date"`
+	HasData   bool      `json:"has_data"`
+}
+
 // KLineRepository 定义K线数据存储接口
 type KLineRepository interface {
 	// Save 批量保存K线数据
@@ -173,6 +181,9 @@ type KLineRepository interface {
 	
 	// GetFirstDate 获取指定交易对的最早日期
 	GetFirstDate(ctx context.Context, symbol string) (time.Time, error)
+	
+	// GetBatchDateRanges 批量获取多个交易对的时间范围（性能优化）
+	GetBatchDateRanges(ctx context.Context, symbols []string) (map[string]*SymbolDateRange, error)
 	
 	// CreateTables 创建数据表
 	CreateTables(ctx context.Context) error
