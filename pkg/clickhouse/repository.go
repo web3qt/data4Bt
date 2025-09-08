@@ -551,13 +551,13 @@ func (r *Repository) createMaterializedView(ctx context.Context, interval string
 	// 获取时间间隔的分钟数
 	intervalMinutes := r.getIntervalMinutes(interval)
 	
-	// 创建物化视图 - 修复GROUP BY问题
+	// 创建物化视图 - 使用简化的GROUP BY语法避免优化器问题
 	createViewQuery := fmt.Sprintf(`
 		CREATE MATERIALIZED VIEW IF NOT EXISTS %s TO %s AS
 		SELECT 
 			symbol,
-			toStartOfInterval(open_time, toIntervalMinute(%d)) as open_time,
-			(toStartOfInterval(open_time, toIntervalMinute(%d)) + toIntervalMinute(%d) - toIntervalMillisecond(1)) as close_time,
+			grouped_time as open_time,
+			(grouped_time + toIntervalMinute(%d) - toIntervalMillisecond(1)) as close_time,
 			any(open_price) as open_price,
 			max(high_price) as high_price,
 			min(low_price) as low_price,
@@ -569,9 +569,15 @@ func (r *Repository) createMaterializedView(ctx context.Context, interval string
 			sum(taker_buy_quote_volume) as taker_buy_quote_volume,
 			'%s' as interval,
 			now() as created_at
-		FROM klines_1m
-		GROUP BY symbol, toStartOfInterval(open_time, toIntervalMinute(%d))
-	`, viewName, tableName, intervalMinutes, intervalMinutes, intervalMinutes, interval, intervalMinutes)
+		FROM (
+			SELECT *,
+				   toStartOfInterval(open_time, toIntervalMinute(%d)) as grouped_time
+			FROM klines_1m
+		)
+		GROUP BY symbol, grouped_time
+	`, viewName, tableName, intervalMinutes, interval, intervalMinutes)
+	
+	r.logger.Debug().Str("interval", interval).Str("query", createViewQuery).Msg("Creating materialized view")
 	
 	return r.conn.Exec(ctx, createViewQuery)
 }
@@ -594,42 +600,72 @@ func (r *Repository) getIntervalMinutes(interval string) int {
 	}
 }
 
-// populateMaterializedView 填充单个物化视图的历史数据
+// populateMaterializedView 填充单个物化视图的历史数据（分批处理）
 func (r *Repository) populateMaterializedView(ctx context.Context, interval string) error {
 	tableName := fmt.Sprintf("klines_%s", interval)
 	intervalMinutes := r.getIntervalMinutes(interval)
 	
 	r.logger.Info().Str("interval", interval).Str("table", tableName).Msg("Populating materialized view with historical data")
 	
-	// 使用与物化视图相同的SQL查询来填充历史数据
-	populateQuery := fmt.Sprintf(`
-		INSERT INTO %s
-		SELECT 
-			symbol,
-			toStartOfInterval(open_time, toIntervalMinute(%d)) as open_time,
-			(toStartOfInterval(open_time, toIntervalMinute(%d)) + toIntervalMinute(%d) - toIntervalMillisecond(1)) as close_time,
-			any(open_price) as open_price,
-			max(high_price) as high_price,
-			min(low_price) as low_price,
-			anyLast(close_price) as close_price,
-			sum(volume) as volume,
-			sum(quote_asset_volume) as quote_asset_volume,
-			sum(number_of_trades) as number_of_trades,
-			sum(taker_buy_base_volume) as taker_buy_base_volume,
-			sum(taker_buy_quote_volume) as taker_buy_quote_volume,
-			'%s' as interval,
-			now() as created_at
-		FROM klines_1m
-		GROUP BY symbol, toStartOfInterval(open_time, toIntervalMinute(%d))
-	`, tableName, intervalMinutes, intervalMinutes, intervalMinutes, interval, intervalMinutes)
-	
-	r.logger.Debug().Str("query", populateQuery).Msg("Executing populate query")
-	
-	if err := r.conn.Exec(ctx, populateQuery); err != nil {
-		return fmt.Errorf("failed to populate table %s: %w", tableName, err)
+	// 获取数据的时间范围
+	var minTime, maxTime time.Time
+	timeQuery := "SELECT min(open_time), max(open_time) FROM klines_1m"
+	row := r.conn.QueryRow(ctx, timeQuery)
+	if err := row.Scan(&minTime, &maxTime); err != nil {
+		return fmt.Errorf("failed to get time range: %w", err)
 	}
 	
-	r.logger.Info().Str("interval", interval).Str("table", tableName).Msg("Materialized view populated successfully")
+	r.logger.Info().Time("min_time", minTime).Time("max_time", maxTime).Msg("Data time range")
+	
+	// 按月分批处理，避免内存溢出
+	batchCount := 0
+	for current := time.Date(minTime.Year(), minTime.Month(), 1, 0, 0, 0, 0, time.UTC); current.Before(maxTime); current = current.AddDate(0, 1, 0) {
+		nextMonth := current.AddDate(0, 1, 0)
+		
+		r.logger.Info().Time("batch_start", current).Time("batch_end", nextMonth).Msg("Processing batch")
+		
+		// 设置分区限制以处理大量交易对
+		if err := r.conn.Exec(ctx, "SET max_partitions_per_insert_block = 1000"); err != nil {
+			r.logger.Warn().Err(err).Msg("Failed to set partition limit")
+		}
+		
+		populateQuery := fmt.Sprintf(`
+			INSERT INTO %s
+			SELECT 
+				symbol,
+				grouped_time as open_time,
+				(grouped_time + toIntervalMinute(%d) - toIntervalMillisecond(1)) as close_time,
+				any(open_price) as open_price,
+				max(high_price) as high_price,
+				min(low_price) as low_price,
+				anyLast(close_price) as close_price,
+				sum(volume) as volume,
+				sum(quote_asset_volume) as quote_asset_volume,
+				sum(number_of_trades) as number_of_trades,
+				sum(taker_buy_base_volume) as taker_buy_base_volume,
+				sum(taker_buy_quote_volume) as taker_buy_quote_volume,
+				'%s' as interval,
+				now() as created_at
+			FROM (
+				SELECT *,
+					   toStartOfInterval(open_time, toIntervalMinute(%d)) as grouped_time
+				FROM klines_1m
+				WHERE open_time >= '%s' AND open_time < '%s'
+			)
+			GROUP BY symbol, grouped_time
+		`, tableName, intervalMinutes, interval, intervalMinutes, 
+		   current.Format("2006-01-02 15:04:05"), nextMonth.Format("2006-01-02 15:04:05"))
+		
+		if err := r.conn.Exec(ctx, populateQuery); err != nil {
+			r.logger.Error().Err(err).Time("batch_start", current).Msg("Failed to populate batch")
+			return fmt.Errorf("failed to populate table %s for batch %s: %w", tableName, current.Format("2006-01"), err)
+		}
+		
+		batchCount++
+		r.logger.Info().Time("batch_start", current).Int("batch_number", batchCount).Msg("Batch completed")
+	}
+	
+	r.logger.Info().Str("interval", interval).Str("table", tableName).Int("total_batches", batchCount).Msg("Materialized view populated successfully")
 	return nil
 }
 

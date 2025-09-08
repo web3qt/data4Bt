@@ -212,11 +212,83 @@ go run cmd/main.go -cmd=run -end=2024-01-31
 go run cmd/main.go -cmd=run -symbols=BTCUSDT,ETHUSDT
 ```
 
-### 8. 创建物化视图
+### 8. 物化视图管理
+
+#### 8.1 创建物化视图
 
 ```bash
-go run cmd/main.go -cmd=create-views
+# 创建所有时间间隔的物化视图 (5m, 15m, 1h, 4h, 1d)
+go run cmd/main.go -cmd=create-views -config=configs/config-dev.yml
 ```
+
+#### 8.2 填充物化视图历史数据
+
+**注意**: ClickHouse物化视图只处理创建后插入的新数据，不会自动包含历史数据。需要手动填充历史数据：
+
+```bash
+# 填充所有物化视图的历史数据（支持分批处理，避免内存溢出）
+go run cmd/main.go -cmd=populate-views -config=configs/config-dev.yml
+```
+
+**填充过程特点**：
+- ✅ **自动分批处理**: 按月份分批处理，避免大数据量导致内存溢出
+- ⚡ **智能优化**: 自动设置ClickHouse分区限制，支持大量交易对并发处理
+- 🔄 **断点续传**: 支持中断后继续处理，已处理的数据不会重复
+- 📊 **实时进度**: 显示详细的处理进度和批次信息
+- 🛡️ **数据安全**: 使用相同的聚合逻辑，确保数据一致性
+
+**处理时间估算**（336M条基础数据）：
+- 5分钟数据：约2-3分钟处理完成
+- 15分钟数据：约1-2分钟处理完成  
+- 1小时数据：约30-60秒处理完成
+- 4小时和1天数据：约10-30秒处理完成
+
+#### 8.3 验证物化视图数据
+
+```bash
+# 检查物化视图数据量
+docker exec data4bt-clickhouse clickhouse-client --user=default --password=123456 --query "
+SELECT 
+    'klines_5m' as table, count(*) as row_count FROM data4BT.klines_5m 
+UNION ALL SELECT 
+    'klines_15m' as table, count(*) as row_count FROM data4BT.klines_15m 
+UNION ALL SELECT 
+    'klines_1h' as table, count(*) as row_count FROM data4BT.klines_1h 
+UNION ALL SELECT 
+    'klines_4h' as table, count(*) as row_count FROM data4BT.klines_4h 
+UNION ALL SELECT 
+    'klines_1d' as table, count(*) as row_count FROM data4BT.klines_1d 
+ORDER BY table"
+
+# 验证数据聚合正确性（以BTCUSDT为例）
+docker exec data4bt-clickhouse clickhouse-client --user=default --password=123456 --query "
+SELECT 
+    symbol, 
+    count(*) as records, 
+    min(open_time) as earliest, 
+    max(open_time) as latest 
+FROM data4BT.klines_5m 
+WHERE symbol IN ('BTCUSDT', 'ETHUSDT') 
+GROUP BY symbol 
+ORDER BY symbol"
+```
+
+#### 8.4 常见问题解决
+
+**内存不足错误**：
+```
+Memory limit exceeded: would use X.XX GiB
+```
+**解决方案**: 系统已实现自动分批处理，如仍遇到此问题，可重新运行命令继续处理。
+
+**分区过多错误**：
+```
+Too many partitions for single INSERT block (more than 100)
+```
+**解决方案**: 系统已自动设置 `max_partitions_per_insert_block = 1000`，支持大量交易对并发处理。
+
+**进度恢复**：
+如果处理过程中断，重新运行 `populate-views` 命令，系统会自动跳过已处理的数据，从中断处继续。
 
 ### 9. 停止数据加载
 
@@ -309,6 +381,7 @@ go run test/btc_test_simple.go
   verify-data   - 综合数据验证 (完整性+质量检查)
   init-db       - 初始化数据库表
   create-views  - 创建物化视图
+  populate-views - 填充物化视图历史数据
   status        - 显示下载状态
   discover      - 发现交易对时间线
   update-latest - 更新到最新数据
@@ -360,8 +433,26 @@ go run cmd/main.go -cmd=init-db
 **`create-views` - 创建物化视图**
 ```bash
 # 创建5m、15m、1h、4h、1d等时间周期的物化视图
-go run cmd/main.go -cmd=create-views
+go run cmd/main.go -cmd=create-views -config=configs/config-dev.yml
 ```
+
+**`populate-views` - 填充物化视图历史数据**
+```bash
+# 填充所有物化视图的历史数据（支持大数据量分批处理）
+go run cmd/main.go -cmd=populate-views -config=configs/config-dev.yml
+```
+
+**populate-views功能特性**：
+- 🔄 **智能分批**: 按月份自动分批处理，避免内存溢出
+- 📊 **实时进度**: 显示详细的处理进度和批次信息  
+- ⚡ **性能优化**: 自动设置ClickHouse参数，支持大量交易对
+- 🛡️ **数据一致**: 使用与物化视图相同的聚合逻辑
+- 🔄 **断点续传**: 支持中断后继续处理，已处理数据不重复
+
+**注意事项**：
+- ClickHouse物化视图只处理创建后插入的新数据
+- 历史数据需要使用此命令手动填充
+- 建议在数据库负载较低时运行此命令
 
 #### 数据管理命令
 
