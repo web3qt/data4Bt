@@ -335,6 +335,20 @@ func (r *Repository) CreateMaterializedViews(ctx context.Context, intervals []st
 	return nil
 }
 
+// PopulateMaterializedViews 为物化视图填充历史数据
+func (r *Repository) PopulateMaterializedViews(ctx context.Context, intervals []string) error {
+	r.logger.Info().Strs("intervals", intervals).Msg("Populating materialized views with historical data")
+	
+	for _, interval := range intervals {
+		if err := r.populateMaterializedView(ctx, interval); err != nil {
+			return fmt.Errorf("failed to populate materialized view for %s: %w", interval, err)
+		}
+	}
+	
+	r.logger.Info().Msg("Materialized views populated successfully")
+	return nil
+}
+
 // RefreshMaterializedViews 刷新物化视图
 func (r *Repository) RefreshMaterializedViews(ctx context.Context) error {
 	// ClickHouse的物化视图是自动更新的，这里可以执行一些优化操作
@@ -542,8 +556,8 @@ func (r *Repository) createMaterializedView(ctx context.Context, interval string
 		CREATE MATERIALIZED VIEW IF NOT EXISTS %s TO %s AS
 		SELECT 
 			symbol,
-			interval_start as open_time,
-			(interval_start + toIntervalMinute(%d) - toIntervalMillisecond(1)) as close_time,
+			toStartOfInterval(open_time, toIntervalMinute(%d)) as open_time,
+			(toStartOfInterval(open_time, toIntervalMinute(%d)) + toIntervalMinute(%d) - toIntervalMillisecond(1)) as close_time,
 			any(open_price) as open_price,
 			max(high_price) as high_price,
 			min(low_price) as low_price,
@@ -556,8 +570,8 @@ func (r *Repository) createMaterializedView(ctx context.Context, interval string
 			'%s' as interval,
 			now() as created_at
 		FROM klines_1m
-		GROUP BY symbol, toStartOfInterval(open_time, toIntervalMinute(%d)) as interval_start
-	`, viewName, tableName, intervalMinutes, interval, intervalMinutes)
+		GROUP BY symbol, toStartOfInterval(open_time, toIntervalMinute(%d))
+	`, viewName, tableName, intervalMinutes, intervalMinutes, intervalMinutes, interval, intervalMinutes)
 	
 	return r.conn.Exec(ctx, createViewQuery)
 }
@@ -578,6 +592,45 @@ func (r *Repository) getIntervalMinutes(interval string) int {
 	default:
 		return 1
 	}
+}
+
+// populateMaterializedView 填充单个物化视图的历史数据
+func (r *Repository) populateMaterializedView(ctx context.Context, interval string) error {
+	tableName := fmt.Sprintf("klines_%s", interval)
+	intervalMinutes := r.getIntervalMinutes(interval)
+	
+	r.logger.Info().Str("interval", interval).Str("table", tableName).Msg("Populating materialized view with historical data")
+	
+	// 使用与物化视图相同的SQL查询来填充历史数据
+	populateQuery := fmt.Sprintf(`
+		INSERT INTO %s
+		SELECT 
+			symbol,
+			toStartOfInterval(open_time, toIntervalMinute(%d)) as open_time,
+			(toStartOfInterval(open_time, toIntervalMinute(%d)) + toIntervalMinute(%d) - toIntervalMillisecond(1)) as close_time,
+			any(open_price) as open_price,
+			max(high_price) as high_price,
+			min(low_price) as low_price,
+			anyLast(close_price) as close_price,
+			sum(volume) as volume,
+			sum(quote_asset_volume) as quote_asset_volume,
+			sum(number_of_trades) as number_of_trades,
+			sum(taker_buy_base_volume) as taker_buy_base_volume,
+			sum(taker_buy_quote_volume) as taker_buy_quote_volume,
+			'%s' as interval,
+			now() as created_at
+		FROM klines_1m
+		GROUP BY symbol, toStartOfInterval(open_time, toIntervalMinute(%d))
+	`, tableName, intervalMinutes, intervalMinutes, intervalMinutes, interval, intervalMinutes)
+	
+	r.logger.Debug().Str("query", populateQuery).Msg("Executing populate query")
+	
+	if err := r.conn.Exec(ctx, populateQuery); err != nil {
+		return fmt.Errorf("failed to populate table %s: %w", tableName, err)
+	}
+	
+	r.logger.Info().Str("interval", interval).Str("table", tableName).Msg("Materialized view populated successfully")
+	return nil
 }
 
 // SaveSymbolInfo 保存交易对信息 (使用UPSERT逻辑)

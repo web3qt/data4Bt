@@ -41,7 +41,7 @@ import (
 
 var (
 	configFile = flag.String("config", "config.yml", "Configuration file path")
-	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, status, discover, update-latest, range-query, list-symbols, update-ranges, check-quality, export-csv")
+	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, populate-views, status, discover, update-latest, range-query, list-symbols, update-ranges, check-quality, export-csv")
 	symbols    = flag.String("symbols", "", "Comma-separated list of symbols to process (optional)")
 	endDate    = flag.String("end", "", "End date (YYYY-MM-DD)")
 	output     = flag.String("output", "", "Output file path for range-query results (optional)")
@@ -142,6 +142,8 @@ func executeCommand(ctx context.Context, cfg *config.Config, cmd string) error {
 		return initializeDatabase(ctx, cfg)
 	case "create-views":
 		return createMaterializedViews(ctx, cfg)
+	case "populate-views":
+		return populateMaterializedViews(ctx, cfg)
 	case "status":
 		return showStatus(ctx, cfg)
 	case "discover":
@@ -353,6 +355,35 @@ func createMaterializedViews(ctx context.Context, cfg *config.Config) error {
 	}
 
 	log.Info().Msg("Materialized views created successfully")
+	return nil
+}
+
+func populateMaterializedViews(ctx context.Context, cfg *config.Config) error {
+	log := logger.GetLogger("mv_populator")
+	log.Info().Msg("Populating materialized views with historical data")
+
+	// 创建ClickHouse仓库
+	repository, err := clickhouse.NewRepository(cfg.Database.ClickHouse)
+	if err != nil {
+		return fmt.Errorf("failed to create repository: %w", err)
+	}
+	defer repository.Close()
+
+	// 获取要填充的时间间隔
+	intervals := cfg.MaterializedViews.Intervals
+	if len(intervals) == 0 {
+		intervals = []string{"5m", "15m", "1h", "4h", "1d"}
+	}
+
+	log.Info().Strs("intervals", intervals).Msg("Starting to populate materialized views")
+
+	// 调用repository方法填充历史数据
+	if err := repository.PopulateMaterializedViews(ctx, intervals); err != nil {
+		return fmt.Errorf("failed to populate materialized views: %w", err)
+	}
+
+	log.Info().Msg("Materialized views populated with historical data successfully")
+	fmt.Println("🎉 物化视图已成功填充历史数据")
 	return nil
 }
 
@@ -1204,6 +1235,7 @@ func init() {
 		fmt.Fprintf(os.Stderr, "  validate   - Validate existing data\n")
 		fmt.Fprintf(os.Stderr, "  init-db    - Initialize database tables\n")
 		fmt.Fprintf(os.Stderr, "  create-views - Create materialized views\n")
+		fmt.Fprintf(os.Stderr, "  populate-views - Populate materialized views with historical data\n")
 		fmt.Fprintf(os.Stderr, "  status     - Show download status\n")
 		fmt.Fprintf(os.Stderr, "  discover   - Discover symbol timelines\n")
 		fmt.Fprintf(os.Stderr, "  update-latest - Update to latest data\n")
