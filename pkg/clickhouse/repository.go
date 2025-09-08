@@ -543,7 +543,7 @@ func (r *Repository) createMaterializedView(ctx context.Context, interval string
 		SELECT 
 			symbol,
 			toStartOfInterval(open_time, toIntervalMinute(%d)) as open_time,
-			toStartOfInterval(open_time, toIntervalMinute(%d)) + toIntervalMinute(%d) - toIntervalMillisecond(1) as close_time,
+			(toStartOfInterval(open_time, toIntervalMinute(%d)) + toIntervalMinute(%d) - toIntervalMillisecond(1)) as close_time,
 			any(open_price) as open_price,
 			max(high_price) as high_price,
 			min(low_price) as low_price,
