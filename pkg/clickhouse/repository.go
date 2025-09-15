@@ -336,11 +336,15 @@ func (r *Repository) CreateMaterializedViews(ctx context.Context, intervals []st
 }
 
 // PopulateMaterializedViews 为物化视图填充历史数据
-func (r *Repository) PopulateMaterializedViews(ctx context.Context, intervals []string) error {
-	r.logger.Info().Strs("intervals", intervals).Msg("Populating materialized views with historical data")
+func (r *Repository) PopulateMaterializedViews(ctx context.Context, intervals []string, symbols []string) error {
+	if len(symbols) > 0 {
+		r.logger.Info().Strs("intervals", intervals).Strs("symbols", symbols).Msg("Populating materialized views with historical data for specific symbols")
+	} else {
+		r.logger.Info().Strs("intervals", intervals).Msg("Populating materialized views with historical data for all symbols")
+	}
 	
 	for _, interval := range intervals {
-		if err := r.populateMaterializedView(ctx, interval); err != nil {
+		if err := r.populateMaterializedView(ctx, interval, symbols); err != nil {
 			return fmt.Errorf("failed to populate materialized view for %s: %w", interval, err)
 		}
 	}
@@ -601,16 +605,36 @@ func (r *Repository) getIntervalMinutes(interval string) int {
 }
 
 // populateMaterializedView 填充单个物化视图的历史数据（分批处理）
-func (r *Repository) populateMaterializedView(ctx context.Context, interval string) error {
+func (r *Repository) populateMaterializedView(ctx context.Context, interval string, symbols []string) error {
 	tableName := fmt.Sprintf("klines_%s", interval)
 	intervalMinutes := r.getIntervalMinutes(interval)
 	
-	r.logger.Info().Str("interval", interval).Str("table", tableName).Msg("Populating materialized view with historical data")
+	if len(symbols) > 0 {
+		r.logger.Info().Str("interval", interval).Str("table", tableName).Strs("symbols", symbols).Msg("Populating materialized view with historical data for specific symbols")
+	} else {
+		r.logger.Info().Str("interval", interval).Str("table", tableName).Msg("Populating materialized view with historical data for all symbols")
+	}
+	
+	// 构建时间范围查询（可能需要根据symbols过滤）
+	var timeQuery string
+	var args []interface{}
+	
+	if len(symbols) > 0 {
+		// 构建symbol过滤条件
+		symbolPlaceholders := make([]string, len(symbols))
+		for i, symbol := range symbols {
+			symbolPlaceholders[i] = "?"
+			args = append(args, symbol)
+		}
+		timeQuery = fmt.Sprintf("SELECT min(open_time), max(open_time) FROM klines_1m WHERE symbol IN (%s)", 
+			strings.Join(symbolPlaceholders, ","))
+	} else {
+		timeQuery = "SELECT min(open_time), max(open_time) FROM klines_1m"
+	}
 	
 	// 获取数据的时间范围
 	var minTime, maxTime time.Time
-	timeQuery := "SELECT min(open_time), max(open_time) FROM klines_1m"
-	row := r.conn.QueryRow(ctx, timeQuery)
+	row := r.conn.QueryRow(ctx, timeQuery, args...)
 	if err := row.Scan(&minTime, &maxTime); err != nil {
 		return fmt.Errorf("failed to get time range: %w", err)
 	}
@@ -627,6 +651,21 @@ func (r *Repository) populateMaterializedView(ctx context.Context, interval stri
 		// 设置分区限制以处理大量交易对
 		if err := r.conn.Exec(ctx, "SET max_partitions_per_insert_block = 1000"); err != nil {
 			r.logger.Warn().Err(err).Msg("Failed to set partition limit")
+		}
+		
+		// 构建WHERE子句
+		var whereClause string
+		if len(symbols) > 0 {
+			symbolList := make([]string, len(symbols))
+			for i, symbol := range symbols {
+				symbolList[i] = fmt.Sprintf("'%s'", symbol)
+			}
+			whereClause = fmt.Sprintf("WHERE open_time >= '%s' AND open_time < '%s' AND symbol IN (%s)",
+				current.Format("2006-01-02 15:04:05"), nextMonth.Format("2006-01-02 15:04:05"),
+				strings.Join(symbolList, ","))
+		} else {
+			whereClause = fmt.Sprintf("WHERE open_time >= '%s' AND open_time < '%s'",
+				current.Format("2006-01-02 15:04:05"), nextMonth.Format("2006-01-02 15:04:05"))
 		}
 		
 		populateQuery := fmt.Sprintf(`
@@ -650,11 +689,10 @@ func (r *Repository) populateMaterializedView(ctx context.Context, interval stri
 				SELECT *,
 					   toStartOfInterval(open_time, toIntervalMinute(%d)) as grouped_time
 				FROM klines_1m
-				WHERE open_time >= '%s' AND open_time < '%s'
+				%s
 			)
 			GROUP BY symbol, grouped_time
-		`, tableName, intervalMinutes, interval, intervalMinutes, 
-		   current.Format("2006-01-02 15:04:05"), nextMonth.Format("2006-01-02 15:04:05"))
+		`, tableName, intervalMinutes, interval, intervalMinutes, whereClause)
 		
 		if err := r.conn.Exec(ctx, populateQuery); err != nil {
 			r.logger.Error().Err(err).Time("batch_start", current).Msg("Failed to populate batch")
@@ -1083,4 +1121,38 @@ func (r *Repository) UpdateSymbolInfo(ctx context.Context, symbolInfo *domain.Sy
 // QueryContext 执行查询并返回结果行
 func (r *Repository) QueryContext(ctx context.Context, query string, args ...interface{}) (driver.Rows, error) {
 	return r.conn.Query(ctx, query, args...)
+}
+
+// Query 执行查询并返回结果行（简化版本）
+func (r *Repository) Query(ctx context.Context, query string, args ...interface{}) (interface{}, error) {
+	return r.conn.Query(ctx, query, args...)
+}
+
+// DeleteDataInRange 删除指定时间范围内的数据
+func (r *Repository) DeleteDataInRange(ctx context.Context, symbol string, startTime, endTime time.Time) error {
+	query := `
+		ALTER TABLE klines_1m 
+		DELETE 
+		WHERE symbol = ? 
+		AND open_time >= ? 
+		AND open_time <= ?
+	`
+	
+	r.logger.Debug().
+		Str("symbol", symbol).
+		Time("start_time", startTime).
+		Time("end_time", endTime).
+		Msg("Deleting data in range")
+
+	if err := r.conn.Exec(ctx, query, symbol, startTime, endTime); err != nil {
+		return fmt.Errorf("failed to delete data in range: %w", err)
+	}
+
+	r.logger.Info().
+		Str("symbol", symbol).
+		Time("start_time", startTime).
+		Time("end_time", endTime).
+		Msg("Successfully deleted data in range")
+
+	return nil
 }

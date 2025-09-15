@@ -932,3 +932,77 @@ func (s *Scheduler) Stop(ctx context.Context) error {
 	s.logger.Info().Msg("Scheduler stopped")
 	return nil
 }
+
+// BackfillGaps 执行数据缺口补全
+func (s *Scheduler) BackfillGaps(ctx context.Context, tasks []domain.DownloadTask, force bool) error {
+	s.logger.Info().
+		Int("task_count", len(tasks)).
+		Bool("force_redownload", force).
+		Msg("Starting gaps backfill")
+
+	start := time.Now()
+	defer func() {
+		logger.LogPerformance("scheduler", "backfill_gaps", time.Since(start), map[string]interface{}{
+			"task_count": len(tasks),
+			"force":      force,
+		})
+	}()
+
+	if len(tasks) == 0 {
+		s.logger.Info().Msg("No backfill tasks to process")
+		return nil
+	}
+
+	// 如果强制模式，需要先清理已存在但可能不完整的数据
+	if force {
+		if err := s.cleanExistingDataForTasks(ctx, tasks); err != nil {
+			s.logger.Warn().Err(err).Msg("Failed to clean existing data, continuing anyway")
+		}
+	}
+
+	// 使用现有的并发处理逻辑
+	if err := s.processTasksConcurrent(ctx, tasks); err != nil {
+		return fmt.Errorf("failed to process backfill tasks: %w", err)
+	}
+
+	s.logger.Info().
+		Dur("total_duration", time.Since(start)).
+		Msg("Gaps backfill completed successfully")
+
+	return nil
+}
+
+// cleanExistingDataForTasks 清理指定任务的现有数据
+func (s *Scheduler) cleanExistingDataForTasks(ctx context.Context, tasks []domain.DownloadTask) error {
+	s.logger.Info().Msg("Cleaning existing data for force backfill")
+
+	// 按symbol分组任务
+	symbolTasks := make(map[string][]domain.DownloadTask)
+	for _, task := range tasks {
+		symbolTasks[task.Symbol] = append(symbolTasks[task.Symbol], task)
+	}
+
+	for symbol, symbolTaskList := range symbolTasks {
+		for _, task := range symbolTaskList {
+			// 删除特定月份的数据
+			startOfMonth := time.Date(task.Date.Year(), task.Date.Month(), 1, 0, 0, 0, 0, time.UTC)
+			endOfMonth := startOfMonth.AddDate(0, 1, 0).Add(-time.Second)
+
+			if err := s.repository.DeleteDataInRange(ctx, symbol, startOfMonth, endOfMonth); err != nil {
+				s.logger.Warn().
+					Err(err).
+					Str("symbol", symbol).
+					Str("month", task.Date.Format("2006-01")).
+					Msg("Failed to delete existing data for month")
+				// 继续处理其他月份
+			} else {
+				s.logger.Debug().
+					Str("symbol", symbol).
+					Str("month", task.Date.Format("2006-01")).
+					Msg("Cleaned existing data for month")
+			}
+		}
+	}
+
+	return nil
+}

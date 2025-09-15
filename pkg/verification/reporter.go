@@ -56,6 +56,13 @@ func (dr *DatabaseReporter) GenerateBatchConsoleReport(report *BatchDatabaseVeri
 	return sb.String()
 }
 
+// GenerateSymbolConsoleReport 生成单个交易对的控制台报告（便于流式输出）
+func (dr *DatabaseReporter) GenerateSymbolConsoleReport(report *DatabaseVerificationReport) string {
+    var sb strings.Builder
+    dr.writeSymbolReport(&sb, report)
+    return sb.String()
+}
+
 // writeSymbolReport 写入单个交易对的报告
 func (dr *DatabaseReporter) writeSymbolReport(sb *strings.Builder, report *DatabaseVerificationReport) {
 	// 确定状态图标和颜色

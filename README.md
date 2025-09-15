@@ -12,6 +12,7 @@
 - ⏱️ **物化视图**: 自动创建5m、15m、1h、4h、1d等多时间周期视图
 - 📈 **进度监控**: 实时进度报告和Web仪表板
 - 🔄 **状态管理**: 支持断点续传和增量更新
+- 🔄 **历史数据补全**: 智能检测数据缺口并自动补全历史数据
 - 📝 **结构化日志**: 详细的操作日志和性能指标
 - 🛑 **智能信号处理**: 优雅的进程管理和快速响应Ctrl+C
 - 🔧 **进程管理**: 智能进程查找、优雅关闭和强制终止机制
@@ -228,6 +229,12 @@ go run cmd/main.go -cmd=create-views -config=configs/config-dev.yml
 ```bash
 # 填充所有物化视图的历史数据（支持分批处理，避免内存溢出）
 go run cmd/main.go -cmd=populate-views -config=configs/config-dev.yml
+
+# 填充指定交易对的物化视图历史数据（提升处理效率）
+go run cmd/main.go -cmd=populate-views -symbols=BTCUSDT,ETHUSDT -config=configs/config-dev.yml
+
+# 填充单个交易对的物化视图历史数据
+go run cmd/main.go -cmd=populate-views -symbols=1000CATUSDT -config=configs/config-dev.yml
 ```
 
 **填充过程特点**：
@@ -333,11 +340,66 @@ go run cmd/main.go -cmd=verify-data -symbols=BTCUSDT,ETHUSDT
 go run cmd/main.go -cmd=validate
 ```
 
-### 11. 定期维护
+### 11. 历史数据补全工作流
+
+如果通过 `verify-data` 命令发现数据不完整，可以使用以下工作流进行修复：
+
+#### 步骤1: 数据完整性检查
+```bash
+# 检查数据完整性，生成详细报告
+go run cmd/main.go -cmd=verify-data
+
+# 检查特定交易对
+go run cmd/main.go -cmd=verify-data -symbols=BTCUSDT,ETHUSDT
+```
+
+#### 步骤2: 缺口检测和预览
+```bash
+# 预览所有交易对的数据缺口（推荐先执行）
+go run cmd/main.go -cmd=backfill-gaps -dry-run
+
+# 预览特定交易对的缺口
+go run cmd/main.go -cmd=backfill-gaps -symbols=BTCUSDT -dry-run
+```
+
+#### 步骤3: 执行历史数据补全
+```bash
+# 补全所有检测到的缺口
+go run cmd/main.go -cmd=backfill-gaps
+
+# 补全特定交易对的缺口
+go run cmd/main.go -cmd=backfill-gaps -symbols=BTCUSDT,ETHUSDT
+
+# 强制重新下载特定月份数据（如数据损坏）
+go run cmd/main.go -cmd=backfill-gaps -symbols=BTCUSDT -force
+```
+
+#### 步骤4: 验证补全结果
+```bash
+# 再次验证数据完整性，确认问题已解决
+go run cmd/main.go -cmd=verify-data -symbols=BTCUSDT,ETHUSDT
+```
+
+#### 步骤5: 更新物化视图（如需要）
+```bash
+# 如果补全了大量历史数据，可能需要刷新物化视图
+go run cmd/main.go -cmd=populate-views
+```
+
+### 12. 定期维护
 
 建议定期运行以下命令来维护数据的完整性：
 
 ```bash
+# 定期进行数据质量检查（每周推荐）
+go run cmd/main.go -cmd=verify-data
+
+# 补全发现的历史数据缺口
+go run cmd/main.go -cmd=backfill-gaps
+
+# 更新到最新数据（每日推荐）
+go run cmd/main.go -cmd=update-latest
+
 # 每月更新交易对时间范围（当有新的月度数据时）
 go run cmd/main.go -cmd=update-ranges
 
@@ -346,12 +408,9 @@ go run cmd/main.go -cmd=list-symbols
 
 # 检查下载状态和进度
 go run cmd/main.go -cmd=status -detailed
-
-# 定期进行数据质量检查
-go run cmd/main.go -cmd=verify-data
 ```
 
-### 12. 脚本速查
+### 13. 脚本速查
 
 - `./start.sh` 启动数据加载器（支持 `--background`、`--dev`、`--prod`、`--verbose`）
 - `./stop.sh` 智能停止相关进程（支持 `--dry-run`、`--verbose`、自定义超时）
@@ -359,7 +418,7 @@ go run cmd/main.go -cmd=verify-data
 - `./restart_clickhouse.sh` 重启并自检 ClickHouse 容器
 - `./check_status.sh` 快速系统状态体检
 
-### 13. 数据库清理
+### 14. 数据库清理
 
 如需清空 ClickHouse 中已导入的 K 线数据（谨慎操作，不可逆）：
 
@@ -412,6 +471,7 @@ go run test/btc_test_simple.go
   status        - 显示下载状态
   discover      - 发现交易对时间线
   update-latest - 更新到最新数据
+  backfill-gaps - 补全历史数据缺口
   range-query   - 查询历史数据范围
   list-symbols  - 列出数据库中的交易对
   update-ranges - 更新交易对时间范围
@@ -431,6 +491,10 @@ go run test/btc_test_simple.go
         显示详细状态信息
   -verbose
         启用详细日志
+  -dry-run
+        预览模式，显示将要执行的操作但不实际执行
+  -force
+        强制模式，覆盖已存在的数据
   -version
         显示版本信息
 ```
@@ -466,19 +530,39 @@ go run cmd/main.go -cmd=create-views -config=configs/config-dev.yml
 **`populate-views` - 填充物化视图历史数据**
 ```bash
 # 填充所有物化视图的历史数据（支持大数据量分批处理）
-go run cmd/main.go -cmd=populate-views -config=configs/config-dev.yml
+go run cmd/main.go -cmd=populate-views
+
+# 填充指定交易对的物化视图历史数据
+go run cmd/main.go -cmd=populate-views -symbols=BTCUSDT,ETHUSDT
+
+# 填充单个交易对的物化视图历史数据
+go run cmd/main.go -cmd=populate-views -symbols=1000CATUSDT
 ```
 
-**populate-views功能特性**：
+**📋 功能说明**：
+- 将 `klines_1m` 表中的分钟级数据聚合生成不同时间间隔的K线数据
+- 生成时间间隔：5分钟、15分钟、1小时、4小时、1天
+- **新增**: 支持 `-symbols` 参数过滤特定交易对，显著提升处理效率
+
+**🔧 数据聚合逻辑**：
+- `open_price`: 取任意值 (`any()`)
+- `high_price`: 取最大值 (`max()`)
+- `low_price`: 取最小值 (`min()`)
+- `close_price`: 取最后值 (`anyLast()`)
+- `volume`、`quote_asset_volume`: 求和 (`sum()`)
+
+**📊 功能特性**：
 - 🔄 **智能分批**: 按月份自动分批处理，避免内存溢出
 - 📊 **实时进度**: 显示详细的处理进度和批次信息
 - ⚡ **性能优化**: 自动设置ClickHouse参数，支持大量交易对
 - 🛡️ **数据一致**: 使用与物化视图相同的聚合逻辑
-- 🔄 **断点续传**: 支持中断后继续处理，已处理数据不重复
 
-**注意事项**：
-- ClickHouse物化视图只处理创建后插入的新数据
-- 历史数据需要使用此命令手动填充
+**⚠️ 注意事项**：
+- **资源消耗**: 处理全部数据时耗时较长，使用 `-symbols` 参数可显著减少处理时间
+- **覆盖现有数据**: 会重新插入数据到物化视图表
+- **符号过滤**: 支持 `-symbols` 参数，可只处理指定交易对，提升处理效率
+- **不可中断恢复**: 如果中断，需要重新开始
+- ClickHouse物化视图只处理创建后插入的新数据，历史数据需要手动填充
 - 建议在数据库负载较低时运行此命令
 
 #### 数据管理命令
@@ -622,6 +706,72 @@ go run cmd/main.go -cmd=update-latest
 # 更新特定交易对到最新数据
 go run cmd/main.go -cmd=update-latest -symbols=BTCUSDT
 ```
+
+**`backfill-gaps` - 补全历史数据缺口**
+```bash
+# 检测并补全所有交易对的历史数据缺口
+go run cmd/main.go -cmd=backfill-gaps
+
+# 预览模式 - 只显示检测到的缺口，不执行补全
+go run cmd/main.go -cmd=backfill-gaps -dry-run
+
+# 补全特定交易对的数据缺口
+go run cmd/main.go -cmd=backfill-gaps -symbols=BTCUSDT,ETHUSDT
+
+# 强制模式 - 重新下载已存在的数据（覆盖现有数据）
+go run cmd/main.go -cmd=backfill-gaps -symbols=BTCUSDT -force
+
+# 预览特定交易对的缺口情况
+go run cmd/main.go -cmd=backfill-gaps -symbols=BTCUSDT -dry-run
+```
+
+**backfill-gaps功能特性**：
+- 🔍 **智能缺口检测**: 对比币安可用数据与数据库实际数据，精确识别缺失月份
+- 🎯 **精准补全**: 只下载缺失的月份数据，避免重复下载
+- 👀 **预览模式**: `-dry-run` 参数预览将要补全的数据缺口，无风险评估
+- ⚡ **强制模式**: `-force` 参数强制重新下载，确保数据完整性
+- 🔄 **并发处理**: 利用现有调度器，支持多协程并发下载
+- 📊 **详细报告**: 显示每个交易对的缺口统计和补全进度
+- 🛡️ **安全确认**: 非预览模式需要用户确认才执行实际补全操作
+
+**使用场景**：
+- **历史数据修复**: 修复因网络中断、存储故障等原因造成的数据缺失
+- **数据完整性保障**: 确保数据库中包含币安所有可用的历史数据
+- **新交易对补全**: 为新添加的交易对下载完整的历史数据
+- **数据验证后修复**: 配合 `verify-data` 命令发现问题后的精准修复
+
+**操作流程**：
+1. **检测阶段**: 系统自动对比币安可用数据与数据库现有数据
+2. **分析阶段**: 识别缺失月份，计算缺口严重程度（critical/high/medium/low）
+3. **预览阶段**: 显示详细的缺口报告，包括缺失月份列表和补全计划
+4. **确认阶段**: 等待用户确认是否执行补全操作（可跳过预览直接执行）
+5. **执行阶段**: 并发下载缺失数据，实时显示进度
+6. **验证阶段**: 自动验证下载的数据完整性
+
+**输出示例**：
+```
+=== 历史数据缺口检测报告 ===
+检测到 2 个交易对有数据缺口:
+
+🔍 BTCUSDT (缺口严重程度: medium)
+  缺失月份: 2020-01, 2020-02, 2020-03 (3个月)
+  时间范围: 2020-01-01 至 2020-03-31
+
+🔍 ETHUSDT (缺口严重程度: low)  
+  缺失月份: 2021-06 (1个月)
+  时间范围: 2021-06-01 至 2021-06-30
+
+总计: 2个交易对, 4个月份需要补全
+
+预计下载任务: 4个文件
+是否继续执行补全? (y/N):
+```
+
+**注意事项**：
+- 此命令专门用于补全历史数据缺口，与 `update-latest` 命令互补使用
+- `update-latest` 只向前更新（从最后处理日期到当前），`backfill-gaps` 补全历史缺口
+- 建议先使用 `-dry-run` 参数预览缺口情况，评估补全工作量后再执行
+- 使用 `-force` 参数时要谨慎，会覆盖已存在的数据
 
 #### 数据导出命令
 
@@ -805,6 +955,17 @@ ORDER BY (symbol, open_time)
    - 添加执行权限: `chmod +x start.sh stop.sh`
    - 检查脚本依赖: `ls -la scripts/`
 
+8. **backfill-gaps 相关问题**
+   - **缺口检测失败**: 检查数据库连接和 symbol_infos 表是否存在数据
+   - **下载任务失败**: 某些月份数据在币安可能不存在（404错误为正常现象）
+   - **强制模式数据清理失败**: 检查 ClickHouse 权限，确保可以执行 DELETE 操作
+   - **状态与实际数据不一致**: 使用 `-force` 参数重新下载可疑数据
+
+9. **数据完整性问题**
+   - **verify-data 报告数据不完整**: 使用 `backfill-gaps` 补全缺失的历史数据
+   - **物化视图数据不一致**: 补全历史数据后运行 `populate-views` 刷新物化视图
+   - **CSV解析失败**: 检查网络连接，某些月份可能确实无数据
+
 ### 日志分析
 
 系统提供详细的结构化日志：
@@ -884,6 +1045,18 @@ MIT License
 欢迎提交Issue和Pull Request！
 
 ## 更新日志
+
+### v1.3.0
+
+- ✨ **重大新增**: `backfill-gaps` 命令 - 智能历史数据补全功能
+- 🔍 **新增**: 智能数据缺口检测，对比币安可用数据与数据库实际数据
+- 👀 **新增**: 预览模式 (`-dry-run`)，无风险评估数据缺口情况
+- ⚡ **新增**: 强制模式 (`-force`)，支持覆盖重新下载已存在数据
+- 🎯 **优化**: 精准补全机制，只下载缺失的月份数据，避免重复下载
+- 📊 **增强**: 详细的缺口分析报告，包含严重程度评估和补全计划
+- 🔧 **扩展**: 新增 repository 接口方法支持通用查询和数据删除
+- 🛠️ **改进**: 完善的数据完整性工作流，与 verify-data 命令深度集成
+- 📚 **文档**: 全面更新 README，添加历史数据补全使用指南和故障排除
 
 ### v1.2.2
 

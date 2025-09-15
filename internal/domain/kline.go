@@ -221,6 +221,12 @@ type KLineRepository interface {
 	// GetDataCompletenessForSymbol 获取交易对数据完整性统计
 	GetDataCompletenessForSymbol(ctx context.Context, symbol string, startMonth, endMonth string) (*DataCompletenessStats, error)
 	
+	// Query 执行通用查询，返回Rows供调用方自行处理
+	Query(ctx context.Context, query string, args ...interface{}) (interface{}, error)
+	
+	// DeleteDataInRange 删除指定时间范围内的数据
+	DeleteDataInRange(ctx context.Context, symbol string, startTime, endTime time.Time) error
+	
 	// Close 关闭连接
 	Close() error
 }

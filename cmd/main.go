@@ -18,6 +18,7 @@ import (
 	"binance-data-loader/pkg/binance"
 	"binance-data-loader/pkg/clickhouse"
 	"binance-data-loader/pkg/csvexport"
+	"binance-data-loader/pkg/gaps"
 	"binance-data-loader/pkg/importer"
 	"binance-data-loader/pkg/monitor"
 	"binance-data-loader/pkg/parser"
@@ -40,17 +41,20 @@ import (
 */
 
 var (
-	configFile = flag.String("config", "config.yml", "Configuration file path")
-	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, populate-views, status, discover, update-latest, range-query, list-symbols, update-ranges, check-quality, export-csv")
-	symbols    = flag.String("symbols", "", "Comma-separated list of symbols to process (optional)")
-	endDate    = flag.String("end", "", "End date (YYYY-MM-DD)")
-	output     = flag.String("output", "", "Output file path for range-query results (optional)")
-	verbose    = flag.Bool("verbose", false, "Enable verbose logging")
-	version    = flag.Bool("version", false, "Show version information")
-	detailed   = flag.Bool("detailed", false, "Show detailed status information")
-	startDate  = flag.String("start", "", "Start date for quality check (YYYY-MM-DD)")
-	format     = flag.String("format", "console", "Output format for quality check: console, json, csv, markdown")
-	interval   = flag.String("interval", "1m", "Time interval for CSV export: 1m, 5m, 15m, 1h, 4h, 1d")
+    configFile = flag.String("config", "config.yml", "Configuration file path")
+    command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, populate-views, status, discover, update-latest, range-query, list-symbols, update-ranges, check-quality, export-csv, backfill-gaps")
+    symbols    = flag.String("symbols", "", "Comma-separated list of symbols to process (optional)")
+    endDate    = flag.String("end", "", "End date (YYYY-MM-DD)")
+    output     = flag.String("output", "", "Output file path for range-query results (optional)")
+    verbose    = flag.Bool("verbose", false, "Enable verbose logging")
+    version    = flag.Bool("version", false, "Show version information")
+    detailed   = flag.Bool("detailed", false, "Show detailed status information")
+    startDate  = flag.String("start", "", "Start date for quality check (YYYY-MM-DD)")
+    format     = flag.String("format", "console", "Output format for quality check: console, json, csv, markdown")
+    interval   = flag.String("interval", "1m", "Time interval for CSV export: 1m, 5m, 15m, 1h, 4h, 1d")
+    stream     = flag.Bool("stream", false, "Stream per-symbol verification output as each completes")
+    dryRun     = flag.Bool("dry-run", false, "Preview gaps without downloading data")
+    force      = flag.Bool("force", false, "Force redownload of existing data")
 )
 
 const (
@@ -158,6 +162,8 @@ func executeCommand(ctx context.Context, cfg *config.Config, cmd string) error {
 		return checkDataQuality(ctx, cfg)
 	case "export-csv":
 		return exportCSV(ctx, cfg)
+	case "backfill-gaps":
+		return backfillGaps(ctx, cfg)
 	default:
 		return fmt.Errorf("unknown command: %s", cmd)
 	}
@@ -375,10 +381,21 @@ func populateMaterializedViews(ctx context.Context, cfg *config.Config) error {
 		intervals = []string{"5m", "15m", "1h", "4h", "1d"}
 	}
 
+	// 解析symbols参数
+	var symbolList []string
+	if *symbols != "" {
+		symbolList = strings.Split(strings.TrimSpace(*symbols), ",")
+		// 清理空白字符
+		for i, symbol := range symbolList {
+			symbolList[i] = strings.TrimSpace(symbol)
+		}
+		log.Info().Strs("symbols", symbolList).Msg("Filtering specific symbols")
+	}
+
 	log.Info().Strs("intervals", intervals).Msg("Starting to populate materialized views")
 
 	// 调用repository方法填充历史数据
-	if err := repository.PopulateMaterializedViews(ctx, intervals); err != nil {
+	if err := repository.PopulateMaterializedViews(ctx, intervals, symbolList); err != nil {
 		return fmt.Errorf("failed to populate materialized views: %w", err)
 	}
 
@@ -1243,6 +1260,7 @@ func init() {
 		fmt.Fprintf(os.Stderr, "  list-symbols - List symbols in database\n")
 		fmt.Fprintf(os.Stderr, "  update-ranges - Update timeline ranges for symbols\n")
 		fmt.Fprintf(os.Stderr, "  export-csv - Export K-line data to CSV file\n")
+		fmt.Fprintf(os.Stderr, "  backfill-gaps - Detect and fill historical data gaps\n")
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
@@ -1262,6 +1280,11 @@ func init() {
 		fmt.Fprintf(os.Stderr, "  %s -cmd=export-csv -symbols=BTCUSDT -interval=1m # Export BTCUSDT 1m data\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=export-csv -interval=5m -output=data.csv # Export all symbols 5m data\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=export-csv -symbols=ETHUSDT -start=2023-01-01 -end=2023-12-31\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=backfill-gaps                  # Detect and fill all historical gaps\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=backfill-gaps -symbols=BTCUSDT # Fill gaps for specific symbol\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=backfill-gaps -dry-run         # Preview gaps without downloading\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=backfill-gaps -start=2020-01 -end=2024-12 # Fill gaps in range\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -cmd=backfill-gaps -force           # Force redownload existing data\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -cmd=init-db                        # Initialize database\n", os.Args[0])
 	}
 }
@@ -1653,29 +1676,86 @@ func verifyData(ctx context.Context, cfg *config.Config) error {
 	// 创建数据库验证检查器（新的基于数据库的验证逻辑）
 	databaseChecker := verification.NewDatabaseVerificationChecker(comps.repository)
 	
-	// 执行批量数据验证
-	batchReport, err := databaseChecker.VerifyBatchSymbols(ctx, symbolList, startDatePtr, endDatePtr)
-	if err != nil {
-		return fmt.Errorf("failed to verify data: %w", err)
-	}
+    var batchReport *verification.BatchDatabaseVerificationReport
+
+    if *stream {
+        fmt.Println("⏱️ 启用流式输出：每个交易对完成后立即显示结果\n")
+        reporter := verification.NewDatabaseReporter()
+
+        // 逐个验证并即时输出
+        symbolReports := make([]*verification.DatabaseVerificationReport, 0, len(symbolList))
+        validReports := 0
+        var totalScore float64
+
+        for idx, sym := range symbolList {
+            fmt.Printf("(%d/%d) 验证 %s ...\n", idx+1, len(symbolList), sym)
+            rep, rerr := databaseChecker.VerifySymbolData(ctx, sym, startDatePtr, endDatePtr)
+            if rerr != nil {
+                fmt.Printf("❌ %s 验证失败: %v\n\n", sym, rerr)
+                // 即使失败也附加一个空报告以占位
+                rep = &verification.DatabaseVerificationReport{
+                    Symbol:     sym,
+                    DataRange:  &verification.SymbolDataRange{Symbol: sym, HasData: false},
+                    GeneratedAt: time.Now(),
+                }
+            }
+
+            // 即时输出该交易对的报告
+            fmt.Print(reporter.GenerateSymbolConsoleReport(rep))
+
+            // 汇总统计
+            if rep != nil {
+                symbolReports = append(symbolReports, rep)
+                if rep.DataRange != nil && rep.DataRange.HasData {
+                    validReports++
+                    totalScore += rep.QualityScore
+                }
+            }
+        }
+
+        avg := 0.0
+        if validReports > 0 {
+            avg = totalScore / float64(validReports)
+        }
+
+        batchReport = &verification.BatchDatabaseVerificationReport{
+            Reports:             symbolReports,
+            TotalSymbols:        len(symbolList),
+            VerifiedSymbols:     validReports,
+            AverageCompleteness: avg,
+            GeneratedAt:         time.Now(),
+        }
+    } else {
+        // 执行批量数据验证
+        batchReport, err = databaseChecker.VerifyBatchSymbols(ctx, symbolList, startDatePtr, endDatePtr)
+        if err != nil {
+            return fmt.Errorf("failed to verify data: %w", err)
+        }
+    }
 	
 	// 根据详细模式输出结果
-	if *detailed {
-		// 详细模式：输出JSON格式
-		reporter := verification.NewDatabaseReporter()
-		if err := reporter.WriteJSONReport(os.Stdout, batchReport); err != nil {
-			return fmt.Errorf("failed to write detailed report: %w", err)
-		}
-	} else {
-		// 简洁模式：输出用户友好的摘要
-		reporter := verification.NewDatabaseReporter()
-		consoleReport := reporter.GenerateBatchConsoleReport(batchReport)
-		fmt.Print(consoleReport)
-		
-		// 添加验证结论
-		fmt.Println("\n📋 验证结论:")
-		if batchReport.AverageCompleteness >= 95.0 {
-			fmt.Println("✅ 数据完整性优秀，无需特别关注")
+    if *detailed {
+        // 详细模式：输出JSON格式
+        reporter := verification.NewDatabaseReporter()
+        if err := reporter.WriteJSONReport(os.Stdout, batchReport); err != nil {
+            return fmt.Errorf("failed to write detailed report: %w", err)
+        }
+    } else {
+        reporter := verification.NewDatabaseReporter()
+        if *stream {
+            // 流式输出模式下已逐个输出，这里给出简要汇总表
+            fmt.Println("=== 验证汇总表 ===")
+            fmt.Print(reporter.GenerateSummaryTable(batchReport.Reports))
+        } else {
+            // 简洁模式：输出用户友好的摘要
+            consoleReport := reporter.GenerateBatchConsoleReport(batchReport)
+            fmt.Print(consoleReport)
+        }
+
+        // 添加验证结论
+        fmt.Println("\n📋 验证结论:")
+        if batchReport.AverageCompleteness >= 95.0 {
+            fmt.Println("✅ 数据完整性优秀，无需特别关注")
 		} else if batchReport.AverageCompleteness >= 85.0 {
 			fmt.Println("⚠️  数据完整性良好，建议关注部分问题")
 		} else if batchReport.AverageCompleteness >= 70.0 {
@@ -1849,5 +1929,165 @@ func exportCSV(ctx context.Context, cfg *config.Config) error {
 	}
 
 	log.Info().Msg("CSV export completed successfully")
+	return nil
+}
+
+// backfillGaps 补全历史数据缺口
+func backfillGaps(ctx context.Context, cfg *config.Config) error {
+	log := logger.GetLogger("backfill_gaps")
+	log.Info().Msg("Starting historical data gaps backfill")
+
+	// 初始化组件
+	components, err := initializeComponents(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize components: %w", err)
+	}
+	defer components.cleanup()
+
+	// 初始化数据库表
+	if err := components.repository.CreateTables(ctx); err != nil {
+		return fmt.Errorf("failed to create tables: %w", err)
+	}
+
+	// 解析交易对列表
+	var symbolList []string
+	if *symbols == "" {
+		// 如果没有指定symbols，获取数据库中所有交易对
+		log.Info().Msg("No symbols specified, fetching all symbols from database")
+		symbolInfos, err := components.repository.GetAllSymbolInfos(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get all symbols from database: %w", err)
+		}
+
+		if len(symbolInfos) == 0 {
+			return fmt.Errorf("no symbols found in database, please run data import first")
+		}
+
+		// 提取symbol名称
+		symbolList = make([]string, len(symbolInfos))
+		for i, info := range symbolInfos {
+			symbolList[i] = info.Symbol
+		}
+
+		log.Info().Int("symbols_count", len(symbolList)).Msg("Found symbols in database for gap analysis")
+	} else {
+		// 解析用户指定的交易对列表
+		symbolList = parseSymbolsParameter(*symbols)
+		if len(symbolList) == 0 {
+			return fmt.Errorf("no valid symbols provided")
+		}
+	}
+
+	// 解析时间范围
+	var startDatePtr *time.Time
+	if *startDate != "" {
+		parsed, err := parseFlexibleDate(*startDate, true)
+		if err != nil {
+			return fmt.Errorf("invalid start date format (expected YYYY-MM-DD or YYYY-MM): %w", err)
+		}
+		startDatePtr = &parsed
+	}
+
+	var endDatePtr *time.Time
+	if *endDate != "" {
+		parsed, err := parseFlexibleDate(*endDate, false)
+		if err != nil {
+			return fmt.Errorf("invalid end date format (expected YYYY-MM-DD or YYYY-MM): %w", err)
+		}
+		endDatePtr = &parsed
+	}
+
+	// 创建gap检测器
+	gapDetector := gaps.NewGapDetector(components.repository, components.downloader)
+
+	fmt.Printf("🔍 开始检测历史数据缺口...\n")
+	if *symbols == "" {
+		fmt.Printf("📊 交易对: 所有交易对 (共%d个)\n", len(symbolList))
+	} else {
+		fmt.Printf("📊 交易对: %s\n", strings.Join(symbolList, ", "))
+	}
+	if startDatePtr != nil && endDatePtr != nil {
+		fmt.Printf("📅 时间范围: %s 到 %s\n", startDatePtr.Format("2006-01-02"), endDatePtr.Format("2006-01-02"))
+	} else {
+		fmt.Printf("📅 时间范围: 基于币安可用数据范围\n")
+	}
+	fmt.Println()
+
+	// 检测所有缺口
+	allGaps, err := gapDetector.DetectAllGaps(ctx, symbolList, startDatePtr, endDatePtr)
+	if err != nil {
+		return fmt.Errorf("failed to detect gaps: %w", err)
+	}
+
+	if len(allGaps) == 0 {
+		fmt.Println("🎉 未发现数据缺口，所有数据完整！")
+		return nil
+	}
+
+	// 显示检测到的缺口
+	fmt.Printf("🚨 发现 %d 个数据缺口:\n\n", len(allGaps))
+	totalMonths := 0
+	for _, gap := range allGaps {
+		fmt.Printf("📍 %s: %s (共%d个月)\n", gap.Symbol, gap.Description, len(gap.MissingMonths))
+		totalMonths += len(gap.MissingMonths)
+		if *detailed {
+			fmt.Printf("   缺失月份: %s\n", strings.Join(gap.MissingMonths, ", "))
+		}
+	}
+	fmt.Printf("\n📊 总计需要补全: %d 个月的数据\n\n", totalMonths)
+
+	// 如果是预览模式，不执行下载
+	if *dryRun {
+		fmt.Println("🔍 预览模式：仅显示缺口，不执行下载")
+		return nil
+	}
+
+	// 询问用户确认
+	fmt.Print("⚠️  是否继续执行数据补全？ (y/N): ")
+	var response string
+	fmt.Scanln(&response)
+	if response != "y" && response != "Y" {
+		fmt.Println("❌ 用户取消操作")
+		return nil
+	}
+
+	// 生成补全任务
+	backfillTasks := gapDetector.GenerateBackfillTasks(allGaps)
+	
+	fmt.Printf("🚀 开始补全 %d 个任务...\n\n", len(backfillTasks))
+
+	// 创建调度器并执行补全
+	scheduler := scheduler.NewScheduler(
+		cfg.Scheduler,
+		components.downloader,
+		components.importer,
+		components.stateManager,
+		components.progressReporter,
+		components.repository,
+	)
+
+	// 启动进度报告器
+	if components.progressReporter != nil {
+		if err := components.progressReporter.Start(len(backfillTasks)); err != nil {
+			log.Warn().Err(err).Msg("Failed to start progress reporter")
+		}
+	}
+
+	// 执行补全任务
+	if err := scheduler.BackfillGaps(ctx, backfillTasks, *force); err != nil {
+		return fmt.Errorf("backfill failed: %w", err)
+	}
+
+	// 停止调度器
+	if err := scheduler.Stop(ctx); err != nil {
+		log.Warn().Err(err).Msg("Failed to stop scheduler gracefully")
+	}
+
+	fmt.Println("\n🎉 历史数据缺口补全完成！")
+	fmt.Println("💡 建议运行以下命令验证数据完整性:")
+	fmt.Println("   go run cmd/main.go -cmd=verify-data")
+	fmt.Println("   go run cmd/main.go -cmd=populate-views")
+
+	log.Info().Msg("Historical data gaps backfill completed successfully")
 	return nil
 }
