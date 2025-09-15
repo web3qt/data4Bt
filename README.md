@@ -239,7 +239,7 @@ go run cmd/main.go -cmd=populate-views -config=configs/config-dev.yml
 
 **处理时间估算**（336M条基础数据）：
 - 5分钟数据：约2-3分钟处理完成
-- 15分钟数据：约1-2分钟处理完成  
+- 15分钟数据：约1-2分钟处理完成
 - 1小时数据：约30-60秒处理完成
 - 4小时和1天数据：约10-30秒处理完成
 
@@ -248,28 +248,28 @@ go run cmd/main.go -cmd=populate-views -config=configs/config-dev.yml
 ```bash
 # 检查物化视图数据量
 docker exec data4bt-clickhouse clickhouse-client --user=default --password=123456 --query "
-SELECT 
-    'klines_5m' as table, count(*) as row_count FROM data4BT.klines_5m 
-UNION ALL SELECT 
-    'klines_15m' as table, count(*) as row_count FROM data4BT.klines_15m 
-UNION ALL SELECT 
-    'klines_1h' as table, count(*) as row_count FROM data4BT.klines_1h 
-UNION ALL SELECT 
-    'klines_4h' as table, count(*) as row_count FROM data4BT.klines_4h 
-UNION ALL SELECT 
-    'klines_1d' as table, count(*) as row_count FROM data4BT.klines_1d 
+SELECT
+    'klines_5m' as table, count(*) as row_count FROM data4BT.klines_5m
+UNION ALL SELECT
+    'klines_15m' as table, count(*) as row_count FROM data4BT.klines_15m
+UNION ALL SELECT
+    'klines_1h' as table, count(*) as row_count FROM data4BT.klines_1h
+UNION ALL SELECT
+    'klines_4h' as table, count(*) as row_count FROM data4BT.klines_4h
+UNION ALL SELECT
+    'klines_1d' as table, count(*) as row_count FROM data4BT.klines_1d
 ORDER BY table"
 
 # 验证数据聚合正确性（以BTCUSDT为例）
 docker exec data4bt-clickhouse clickhouse-client --user=default --password=123456 --query "
-SELECT 
-    symbol, 
-    count(*) as records, 
-    min(open_time) as earliest, 
-    max(open_time) as latest 
-FROM data4BT.klines_5m 
-WHERE symbol IN ('BTCUSDT', 'ETHUSDT') 
-GROUP BY symbol 
+SELECT
+    symbol,
+    count(*) as records,
+    min(open_time) as earliest,
+    max(open_time) as latest
+FROM data4BT.klines_5m
+WHERE symbol IN ('BTCUSDT', 'ETHUSDT')
+GROUP BY symbol
 ORDER BY symbol"
 ```
 
@@ -324,7 +324,7 @@ pgrep -f "go run.*cmd/main.go" | xargs kill -TERM
 
 ```bash
 # 综合数据验证（推荐）- 同时检查完整性和质量
-go run cmd/main.go -cmd=verify-data
+go run cmd/main.go -cmd=verify-data -config=configs/config-prod.yml
 
 # 验证特定交易对的数据
 go run cmd/main.go -cmd=verify-data -symbols=BTCUSDT,ETHUSDT
@@ -349,6 +349,33 @@ go run cmd/main.go -cmd=status -detailed
 
 # 定期进行数据质量检查
 go run cmd/main.go -cmd=verify-data
+```
+
+### 12. 脚本速查
+
+- `./start.sh` 启动数据加载器（支持 `--background`、`--dev`、`--prod`、`--verbose`）
+- `./stop.sh` 智能停止相关进程（支持 `--dry-run`、`--verbose`、自定义超时）
+- `./status.sh` 查看下载与处理状态（支持 `-d`/`-detailed` 更详细输出）
+- `./restart_clickhouse.sh` 重启并自检 ClickHouse 容器
+- `./check_status.sh` 快速系统状态体检
+
+### 13. 数据库清理
+
+如需清空 ClickHouse 中已导入的 K 线数据（谨慎操作，不可逆）：
+
+```bash
+# 脚本方式（推荐，含安全确认）
+./clear_database.sh
+
+# 或直接运行 Go 程序
+go run clear_database.go
+```
+
+清理后可按需重新初始化并导入数据：
+
+```bash
+go run cmd/main.go -cmd=init-db
+go run cmd/main.go -cmd=run
 ```
 
 ## 快速测试
@@ -444,7 +471,7 @@ go run cmd/main.go -cmd=populate-views -config=configs/config-dev.yml
 
 **populate-views功能特性**：
 - 🔄 **智能分批**: 按月份自动分批处理，避免内存溢出
-- 📊 **实时进度**: 显示详细的处理进度和批次信息  
+- 📊 **实时进度**: 显示详细的处理进度和批次信息
 - ⚡ **性能优化**: 自动设置ClickHouse参数，支持大量交易对
 - 🛡️ **数据一致**: 使用与物化视图相同的聚合逻辑
 - 🔄 **断点续传**: 支持中断后继续处理，已处理数据不重复
