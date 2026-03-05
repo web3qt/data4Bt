@@ -226,9 +226,30 @@ func (p *CSVParser) parseTimestamp(value string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("empty timestamp")
 	}
 
-	// 尝试解析毫秒时间戳
+	// 解析 Unix 时间戳（支持秒/毫秒/微秒/纳秒）
 	if timestamp, err := strconv.ParseInt(value, 10, 64); err == nil {
-		return time.Unix(timestamp/1000, (timestamp%1000)*1000000), nil
+		switch len(value) {
+		case 10: // seconds
+			return time.Unix(timestamp, 0), nil
+		case 13: // milliseconds
+			return time.Unix(timestamp/1_000, (timestamp%1_000)*1_000_000), nil
+		case 16: // microseconds
+			return time.Unix(timestamp/1_000_000, (timestamp%1_000_000)*1_000), nil
+		case 19: // nanoseconds
+			return time.Unix(timestamp/1_000_000_000, timestamp%1_000_000_000), nil
+		default:
+			// 兼容未知位数，按数量级推断
+			switch {
+			case timestamp > 9_999_999_999_999_999: // ~纳秒
+				return time.Unix(timestamp/1_000_000_000, timestamp%1_000_000_000), nil
+			case timestamp > 9_999_999_999_999: // ~微秒
+				return time.Unix(timestamp/1_000_000, (timestamp%1_000_000)*1_000), nil
+			case timestamp > 9_999_999_999: // ~毫秒
+				return time.Unix(timestamp/1_000, (timestamp%1_000)*1_000_000), nil
+			default: // 秒
+				return time.Unix(timestamp, 0), nil
+			}
+		}
 	}
 
 	// 尝试解析ISO格式时间

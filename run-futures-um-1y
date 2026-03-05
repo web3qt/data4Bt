@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+MODE="${1:---bg}" # --bg | --fg | --reset-bg | --reset-fg
+if [[ "$MODE" != "--bg" && "$MODE" != "--fg" && "$MODE" != "--reset-bg" && "$MODE" != "--reset-fg" ]]; then
+  echo "Usage: $0 [--bg|--fg|--reset-bg|--reset-fg]"
+  exit 1
+fi
+
+RESET="false"
+RUN_MODE="$MODE"
+if [[ "$MODE" == "--reset-bg" ]]; then
+  RESET="true"
+  RUN_MODE="--bg"
+elif [[ "$MODE" == "--reset-fg" ]]; then
+  RESET="true"
+  RUN_MODE="--fg"
+fi
+
+CONFIG_FILE="configs/config-futures-um-1y.yml"
+STATE_DIR="state/futures_um_1y"
+STATE_FILE="$STATE_DIR/progress.json"
+SYMBOLS_FILE="$STATE_DIR/symbols.txt"
+PID_FILE=".futures_um_1y_pid"
+STDOUT_LOG="logs/futures_um_1y.out"
+BINARY="./data4bt"
+
+# 连续窗口：2025-03 ~ 2026-02
+# 本任务补齐 2025-03 ~ 2025-12，所以将 last_date 置为 2025-02。
+LAST_DATE="2025-02-01T00:00:00Z"
+NOW_UTC="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+mkdir -p "$STATE_DIR" logs
+
+for cmd in curl jq go; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "Missing dependency: $cmd"
+    exit 1
+  fi
+done
+
+if [[ ! -x "$BINARY" ]] || ! "$BINARY" -version >/dev/null 2>&1; then
+  echo "[0/4] Building binary ($BINARY)..."
+  CGO_ENABLED=0 go build -o "$BINARY" cmd/main.go
+fi
+
+echo "[1/4] Ensuring destination DB/tables..."
+"$BINARY" -cmd=init-db -config="$CONFIG_FILE" >/dev/null
+
+if [[ "$RESET" == "true" || ! -f "$STATE_FILE" ]]; then
+  echo "[2/4] Preparing symbols list..."
+  # 优先复用 2 个月任务的符号列表，保证窗口连续性按同一批币种补齐
+  if [[ -f "state/futures_um_2m/symbols.txt" ]]; then
+    cp "state/futures_um_2m/symbols.txt" "$SYMBOLS_FILE"
+  else
+    curl -fsSL "https://fapi.binance.com/fapi/v1/exchangeInfo" \
+      | jq -r '.symbols[] | select(.status=="TRADING" and (.symbol | endswith("USDT"))) | .symbol' \
+      | sort -u > "$SYMBOLS_FILE"
+  fi
+
+  SYMBOL_COUNT="$(wc -l < "$SYMBOLS_FILE" | tr -d ' ')"
+  if [[ "$SYMBOL_COUNT" -eq 0 ]]; then
+    echo "No symbols found from Binance futures exchangeInfo."
+    exit 1
+  fi
+  echo "Symbols: $SYMBOL_COUNT"
+
+  echo "[3/4] Building seeded state file: $STATE_FILE"
+  jq -Rn --arg last "$LAST_DATE" --arg now "$NOW_UTC" '
+    reduce inputs as $s ({};
+      if ($s | length) == 0 then
+        .
+      else
+        .[$s] = {
+          symbol: $s,
+          last_date: $last,
+          total_files: 0,
+          processed: 0,
+          failed: 0,
+          last_updated: $now,
+          status: "pending",
+          worker_id: -1,
+          current_month: "",
+          error_message: "",
+          progress_percent: 0
+        }
+      end
+    )
+  ' < "$SYMBOLS_FILE" > "$STATE_FILE"
+else
+  echo "[2/4] Reusing existing state: $STATE_FILE"
+  echo "[3/4] Skip state reset (resume mode)"
+fi
+
+echo "[4/4] Starting one-year continuity backfill with $CONFIG_FILE"
+if [[ "$RUN_MODE" == "--fg" ]]; then
+  exec "$BINARY" -cmd=update-latest -config="$CONFIG_FILE"
+else
+  nohup "$BINARY" -cmd=update-latest -config="$CONFIG_FILE" > "$STDOUT_LOG" 2>&1 &
+  PID="$!"
+  echo "$PID" > "$PID_FILE"
+  echo "Started in background. PID=$PID"
+  echo "Logs: $STDOUT_LOG"
+  echo "Watch: ./watch-futures-um-1y"
+fi

@@ -22,21 +22,31 @@ import (
 
 // BinanceDownloader 币安数据下载器
 type BinanceDownloader struct {
-	client     *http.Client
-	baseURL    string
-	dataPath   string
-	filter     string
-	interval   string
-	userAgent  string
-	retryCount int
-	retryDelay time.Duration
-	logger     zerolog.Logger
+	client            *http.Client
+	baseURL           string
+	dataPath          string
+	monthlyKlinesPath string
+	marketType        string
+	exchangeInfoURL   string
+	filter            string
+	interval          string
+	userAgent         string
+	retryCount        int
+	retryDelay        time.Duration
+	logger            zerolog.Logger
 }
 
 // NewBinanceDownloader 创建新的币安下载器
 func NewBinanceDownloader(cfg config.BinanceConfig, downloaderCfg config.DownloaderConfig) *BinanceDownloader {
 	log := logger.GetLogger("binance_downloader")
-	
+
+	marketType := normalizeMarketType(cfg.MarketType)
+	monthlyKlinesPath := normalizeMonthlyKlinesPath(cfg.DataPath, marketType)
+	exchangeInfoURL := strings.TrimSpace(cfg.ExchangeInfoURL)
+	if exchangeInfoURL == "" {
+		exchangeInfoURL = defaultExchangeInfoURL(marketType)
+	}
+
 	client := &http.Client{
 		Timeout: cfg.Timeout,
 	}
@@ -61,15 +71,18 @@ func NewBinanceDownloader(cfg config.BinanceConfig, downloaderCfg config.Downloa
 	}
 
 	return &BinanceDownloader{
-		client:     client,
-		baseURL:    cfg.BaseURL,
-		dataPath:   cfg.DataPath,
-		filter:     cfg.SymbolsFilter,
-		interval:   cfg.Interval,
-		userAgent:  downloaderCfg.UserAgent,
-		retryCount: cfg.RetryCount,
-		retryDelay: cfg.RetryDelay,
-		logger:     log,
+		client:            client,
+		baseURL:           strings.TrimRight(cfg.BaseURL, "/"),
+		dataPath:          cfg.DataPath,
+		monthlyKlinesPath: monthlyKlinesPath,
+		marketType:        marketType,
+		exchangeInfoURL:   exchangeInfoURL,
+		filter:            cfg.SymbolsFilter,
+		interval:          cfg.Interval,
+		userAgent:         downloaderCfg.UserAgent,
+		retryCount:        cfg.RetryCount,
+		retryDelay:        cfg.RetryDelay,
+		logger:            log,
 	}
 }
 
@@ -118,6 +131,11 @@ func (d *BinanceDownloader) Fetch(ctx context.Context, task domain.DownloadTask)
 			return data, nil
 		}
 
+		// 404/数据不存在属于可预期情况，不应重试
+		if domain.IsDataNotAvailableError(err) {
+			return nil, err
+		}
+
 		lastErr = err
 	}
 
@@ -144,24 +162,24 @@ func (d *BinanceDownloader) GetSymbols(ctx context.Context) ([]string, error) {
 	return filteredSymbols, nil
 }
 
-// GetAllSymbolsFromBinance 从币安API获取所有USDT交易对
+// GetAllSymbolsFromBinance 从币安API获取符合过滤条件的交易对
 func (d *BinanceDownloader) GetAllSymbolsFromBinance(ctx context.Context) ([]string, error) {
 	start := time.Now()
 	defer func() {
 		logger.LogPerformance("binance_downloader", "get_all_symbols_from_binance", time.Since(start))
 	}()
 
-	d.logger.Info().Msg("Fetching all USDT symbols from Binance API")
-
-	// 使用Binance API获取交易信息
-	url := "https://api.binance.com/api/v3/exchangeInfo"
+	d.logger.Info().
+		Str("market_type", d.marketType).
+		Str("exchange_info_url", d.exchangeInfoURL).
+		Msg("Fetching symbols from Binance API")
 
 	// 添加重试机制
 	var lastErr error
 	for attempt := 0; attempt <= d.retryCount; attempt++ {
 		if attempt > 0 {
 			d.logger.Warn().
-				Str("url", url).
+				Str("url", d.exchangeInfoURL).
 				Int("attempt", attempt).
 				Err(lastErr).
 				Msg("Retrying API request")
@@ -174,11 +192,11 @@ func (d *BinanceDownloader) GetAllSymbolsFromBinance(ctx context.Context) ([]str
 		}
 
 		d.logger.Debug().
-			Str("url", url).
+			Str("url", d.exchangeInfoURL).
 			Int("attempt", attempt+1).
 			Msg("Requesting symbols from Binance API")
 
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", d.exchangeInfoURL, nil)
 		if err != nil {
 			lastErr = fmt.Errorf("failed to create request: %w", err)
 			continue
@@ -197,7 +215,7 @@ func (d *BinanceDownloader) GetAllSymbolsFromBinance(ctx context.Context) ([]str
 			lastErr = fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 			d.logger.Error().
 				Int("status_code", resp.StatusCode).
-				Str("url", url).
+				Str("url", d.exchangeInfoURL).
 				Msg("Failed to fetch symbols from API")
 			continue
 		}
@@ -213,13 +231,14 @@ func (d *BinanceDownloader) GetAllSymbolsFromBinance(ctx context.Context) ([]str
 		allSymbols := d.extractUSDTSymbolsFromAPI(body)
 
 		if len(allSymbols) == 0 {
-			lastErr = fmt.Errorf("no USDT symbols found in API response")
+			lastErr = fmt.Errorf("no symbols found in API response")
 			continue
 		}
 
 		d.logger.Info().
-			Int("total_usdt_symbols", len(allSymbols)).
-			Msg("All USDT symbols fetched from Binance API")
+			Int("total_symbols", len(allSymbols)).
+			Str("filter", d.filter).
+			Msg("Symbols fetched from Binance API")
 
 		return allSymbols, nil
 	}
@@ -275,7 +294,7 @@ func (d *BinanceDownloader) downloadAndExtract(ctx context.Context, url string, 
 		if resp.StatusCode == http.StatusNotFound {
 			// 404表示数据不存在，这是正常情况（某些月份的数据可能不存在）
 			// 返回特殊的错误类型，上层可以优雅地跳过
-			return nil, domain.NewDataNotAvailableError(symbol, date, 
+			return nil, domain.NewDataNotAvailableError(symbol, date,
 				fmt.Sprintf("data not found on server (HTTP %d)", resp.StatusCode))
 		}
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
@@ -388,7 +407,7 @@ func (d *BinanceDownloader) BuildDownloadURL(symbol string, date time.Time) stri
 	// 按月构建URL: SYMBOL-1m-YYYY-MM.zip
 	dateStr := date.Format("2006-01")
 	filename := fmt.Sprintf("%s-%s-%s.zip", symbol, d.interval, dateStr)
-	return fmt.Sprintf("%s/data/spot/monthly/klines/%s/%s/%s", d.baseURL, symbol, d.interval, filename)
+	return fmt.Sprintf("%s%s/%s/%s/%s", d.baseURL, d.monthlyKlinesPath, symbol, d.interval, filename)
 }
 
 // GetAvailableDates 获取指定交易对的可用月份
@@ -415,7 +434,7 @@ func (d *BinanceDownloader) GetAvailableDates(ctx context.Context, symbol string
 	}
 
 	// 使用二分查找找到数据开始的时间
-	minDate := time.Date(2017, 8, 1, 0, 0, 0, 0, time.UTC) // 币安历史数据开始时间
+	minDate := defaultHistoricalStartDate(d.marketType)
 	maxDate := currentDate
 
 	// 二分查找最早可用的数据
@@ -624,8 +643,16 @@ func (d *BinanceDownloader) extractMonthsFromHTML(html, symbol string) []string 
 
 // extractMonthsFromS3XML 从S3 XML响应中提取月份信息
 func (d *BinanceDownloader) extractMonthsFromS3XML(xmlContent, symbol string) []string {
-	// 匹配S3 XML中的Key元素，格式: <Key>data/spot/monthly/klines/SYMBOL/1m/SYMBOL-1m-YYYY-MM.zip</Key>
-	pattern := fmt.Sprintf(`<Key>data/spot/monthly/klines/%s/%s/%s-%s-(\d{4}-\d{2})\.zip</Key>`, symbol, d.interval, symbol, d.interval)
+	// 匹配S3 XML中的Key元素，格式: <Key>data/.../monthly/klines/SYMBOL/1m/SYMBOL-1m-YYYY-MM.zip</Key>
+	prefix := strings.TrimPrefix(d.monthlyKlinesPath, "/")
+	pattern := fmt.Sprintf(
+		`<Key>%s/%s/%s/%s-%s-(\d{4}-\d{2})\.zip</Key>`,
+		regexp.QuoteMeta(prefix),
+		regexp.QuoteMeta(symbol),
+		regexp.QuoteMeta(d.interval),
+		regexp.QuoteMeta(symbol),
+		regexp.QuoteMeta(d.interval),
+	)
 	re := regexp.MustCompile(pattern)
 	matches := re.FindAllStringSubmatch(xmlContent, -1)
 
@@ -659,7 +686,7 @@ func (d *BinanceDownloader) extractMonthsFromS3XML(xmlContent, symbol string) []
 	return months
 }
 
-// extractUSDTSymbolsFromAPI 从Binance API JSON响应中提取USDT交易对
+// extractUSDTSymbolsFromAPI 从Binance API JSON响应中提取符合过滤条件的交易对
 func (d *BinanceDownloader) extractUSDTSymbolsFromAPI(jsonData []byte) []string {
 	type ExchangeInfo struct {
 		Symbols []struct {
@@ -676,19 +703,25 @@ func (d *BinanceDownloader) extractUSDTSymbolsFromAPI(jsonData []byte) []string 
 		return nil
 	}
 
-	var usdtSymbols []string
+	var filteredSymbols []string
 	for _, symbolInfo := range exchangeInfo.Symbols {
-		// 只获取活跃的USDT交易对
-		if symbolInfo.Status == "TRADING" && strings.HasSuffix(symbolInfo.Symbol, "USDT") {
-			usdtSymbols = append(usdtSymbols, symbolInfo.Symbol)
+		// 只获取活跃交易对，并应用后缀过滤
+		if symbolInfo.Status != "TRADING" {
+			continue
 		}
+		if d.filter != "" && !strings.HasSuffix(symbolInfo.Symbol, d.filter) {
+			continue
+		}
+		filteredSymbols = append(filteredSymbols, symbolInfo.Symbol)
 	}
 
 	d.logger.Debug().
-		Int("usdt_symbols_found", len(usdtSymbols)).
-		Msg("Extracted USDT symbols from API")
+		Int("symbols_found", len(filteredSymbols)).
+		Str("filter", d.filter).
+		Str("market_type", d.marketType).
+		Msg("Extracted symbols from API")
 
-	return usdtSymbols
+	return filteredSymbols
 }
 
 // getFallbackSymbols 返回备用的USDT交易对列表
@@ -696,5 +729,63 @@ func (d *BinanceDownloader) extractUSDTSymbolsFromAPI(jsonData []byte) []string 
 func (d *BinanceDownloader) getFallbackSymbols() []string {
 	return []string{
 		"BTCUSDT", // 只下载BTC数据进行验证
+	}
+}
+
+func normalizeMarketType(raw string) string {
+	marketType := strings.ToLower(strings.TrimSpace(raw))
+	if marketType == "" {
+		return "spot"
+	}
+	switch marketType {
+	case "spot", "futures_um", "futures_cm":
+		return marketType
+	default:
+		return "spot"
+	}
+}
+
+func defaultExchangeInfoURL(marketType string) string {
+	switch marketType {
+	case "futures_um":
+		return "https://fapi.binance.com/fapi/v1/exchangeInfo"
+	case "futures_cm":
+		return "https://dapi.binance.com/dapi/v1/exchangeInfo"
+	default:
+		return "https://api.binance.com/api/v3/exchangeInfo"
+	}
+}
+
+func normalizeMonthlyKlinesPath(dataPath, marketType string) string {
+	path := strings.TrimSpace(dataPath)
+	if path == "" {
+		switch marketType {
+		case "futures_um":
+			path = "/data/futures/um/daily/klines"
+		case "futures_cm":
+			path = "/data/futures/cm/daily/klines"
+		default:
+			path = "/data/spot/daily/klines"
+		}
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	path = strings.TrimSuffix(path, "/")
+	path = strings.Replace(path, "/daily/", "/monthly/", 1)
+	if !strings.HasSuffix(path, "/klines") {
+		path = strings.TrimSuffix(path, "/") + "/klines"
+	}
+	return path
+}
+
+func defaultHistoricalStartDate(marketType string) time.Time {
+	switch marketType {
+	case "futures_um":
+		return time.Date(2019, 9, 1, 0, 0, 0, 0, time.UTC)
+	case "futures_cm":
+		return time.Date(2020, 2, 1, 0, 0, 0, 0, time.UTC)
+	default:
+		return time.Date(2017, 8, 1, 0, 0, 0, 0, time.UTC)
 	}
 }

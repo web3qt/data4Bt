@@ -6,14 +6,12 @@ log:
   level: "warn"            # 生产环境使用warn级别，减少日志量
   format: "json"           # 使用JSON格式，便于日志聚合和分析
   output: "file"           # 输出到文件
-  file_path: "logs/prod.log"
+  file_path: "logs/one_year.log"
 
 # 币安数据源配置 - 生产环境优化
 binance:
   base_url: "https://data.binance.vision"
   data_path: "/data/spot/daily/klines"
-  market_type: "spot"    # spot | futures_um | futures_cm
-  exchange_info_url: ""  # 留空时按 market_type 自动选择
   symbols_filter: "USDT"   # 生产环境可根据需要调整
   interval: "1m"
   timeout: 120s            # 生产环境增加超时时间
@@ -40,16 +38,18 @@ parser:
 database:
   clickhouse:
     hosts: 
-      - "clickhouse-1.prod.internal:9000"
-      - "clickhouse-2.prod.internal:9000"
-      - "clickhouse-3.prod.internal:9000"
+      - "localhost:9000"  # 本地开发环境，生产环境请修改为实际地址
     database: "data4BT"
-    username: "${BDL_DATABASE_USERNAME}"  # 从环境变量获取
-    password: "${BDL_DATABASE_PASSWORD}"  # 从环境变量获取
+    username: "default"  # 生产环境请修改为实际用户名
+    password: "123456"    # 生产环境请修改为实际密码
     settings:
-      max_memory_usage: 8000000000      # 8GB内存限制
-      max_threads: 16
-      max_execution_time: 3600          # 1小时执行时间限制
+      max_memory_usage: 8000000000      # 8GB内存限制（优化大批量验证）
+      max_threads: 32                   # 增加线程数支持并发查询
+      max_execution_time: 7200          # 2小时执行时间限制（验证大量交易对）
+      max_query_size: 262144000         # 250MB查询大小限制（批量查询优化）
+      max_result_rows: 10000000         # 1000万行结果限制
+      max_result_bytes: 4294967296      # 4GB结果大小限制
+      max_compress_block_size: 1048576  # 1MB压缩块大小
     compression: "lz4"
     dial_timeout: 60s
     max_open_conns: 50       # 生产环境高连接数
@@ -66,7 +66,7 @@ importer:
 # 状态管理配置 - 生产环境
 state:
   storage_type: "file"
-  file_path: "state/prod_progress.json"
+  file_path: "state/one_year/progress.json"
   backup_count: 10         # 生产环境更多备份
   save_interval: 30s       # 生产环境较长保存间隔
 
@@ -77,6 +77,14 @@ materialized_views:
   refresh_interval: 5m     # 生产环境较长刷新间隔
   parallel_refresh: true   # 生产环境启用并行刷新
 
+# 验证器配置 - 生产环境优化
+verification:
+  batch_size: 50               # 每批处理的交易对数量
+  enable_progress_display: true # 显示处理进度
+  parallel_completeness_check: true # 并行完整性检查
+  timeout: 7200s               # 2小时验证超时
+  memory_optimization: true    # 启用内存优化
+  
 # 监控配置 - 生产环境完整监控
 monitoring:
   enabled: true
@@ -100,37 +108,19 @@ scheduler:
   auto_discover_symbols: true
   show_startup_overview: false  # 生产环境不显示启动概览
 
-# 生产环境安全和性能注意事项：
+# 生产环境配置说明：
 #
-# 1. 敏感信息管理：
-#    - 数据库密码通过环境变量提供：BDL_DATABASE_PASSWORD
-#    - API密钥通过环境变量提供：BDL_API_KEY
-#    - 不要在配置文件中硬编码敏感信息
+# 1. 安全配置：
+#    - 修改数据库用户名和密码为生产环境实际值
+#    - 配置实际的数据库服务器地址
+#    - 移除或配置代理设置
 #
-# 2. 资源限制：
+# 2. 性能调优：
 #    - 根据服务器规格调整并发数和内存限制
 #    - 监控系统资源使用情况
-#    - 设置适当的超时和重试策略
-#
-# 3. 监控和告警：
-#    - 启用详细的性能监控
-#    - 配置日志聚合和分析
-#    - 设置关键指标的告警阈值
-#
-# 4. 高可用性：
-#    - 配置多个ClickHouse节点
-#    - 实施数据备份策略
-#    - 配置故障转移机制
-#
-# 5. 性能优化：
 #    - 根据数据量调整批次大小
-#    - 优化数据库连接池配置
-#    - 监控和调整并发参数
-
-# 生产环境环境变量示例：
-# export BDL_DATABASE_USERNAME=prod_user
-# export BDL_DATABASE_PASSWORD=secure_password_here
-# export BDL_LOG_LEVEL=warn
-# export BDL_DOWNLOADER_CONCURRENCY=20
-# export BDL_PARSER_CONCURRENCY=10
-# export BDL_IMPORTER_BATCH_SIZE=50000
+#
+# 3. 监控配置：
+#    - 配置日志文件路径和轮转策略
+#    - 设置监控端口和健康检查
+#    - 配置告警阈值

@@ -1,0 +1,101 @@
+# USDT-M 合约 1m 数据配置
+# 使用方式:
+#   CGO_ENABLED=0 go run cmd/main.go -cmd=update-latest -config=configs/config-futures-um.yml
+
+log:
+  level: "warn"
+  format: "json"
+  output: "file"
+  file_path: "logs/futures_um.log"
+
+binance:
+  base_url: "https://data.binance.vision"
+  data_path: "/data/futures/um/daily/klines"
+  market_type: "futures_um"
+  exchange_info_url: ""
+  symbols_filter: "USDT"
+  interval: "1m"
+  timeout: 120s
+  retry_count: 10
+  retry_delay: 10s
+  proxy_url: ""
+
+downloader:
+  concurrency: 20
+  buffer_size: 200
+  user_agent: "BinanceDataLoader-Futures/1.0"
+  enable_compression: true
+  max_file_size: "500MB"
+
+parser:
+  concurrency: 10
+  buffer_size: 100
+  validate_data: true
+  skip_invalid_rows: true
+
+database:
+  clickhouse:
+    hosts:
+      - "localhost:9000"
+    database: "data4BT_futures_um"
+    username: "default"
+    password: "123456"
+    settings:
+      max_memory_usage: 8000000000
+      max_threads: 32
+      max_execution_time: 7200
+      max_query_size: 262144000
+      max_result_rows: 10000000
+      max_result_bytes: 4294967296
+      max_compress_block_size: 1048576
+    compression: "lz4"
+    dial_timeout: 60s
+    max_open_conns: 50
+    max_idle_conns: 20
+    conn_max_lifetime: 30m
+
+importer:
+  batch_size: 50000
+  buffer_size: 100
+  flush_interval: 60s
+  enable_deduplication: true
+
+state:
+  storage_type: "file"
+  file_path: "state/futures_um/progress.json"
+  backup_count: 10
+  save_interval: 30s
+
+materialized_views:
+  enabled: true
+  intervals: ["5m", "15m", "1h", "4h", "1d"]
+  refresh_interval: 5m
+  parallel_refresh: true
+
+verification:
+  batch_size: 50
+  enable_progress_display: true
+  parallel_completeness_check: true
+  timeout: 7200s
+  memory_optimization: true
+
+monitoring:
+  enabled: false
+  metrics_port: 8080
+  health_check_port: 8081
+  progress_report_interval: 300s
+  web_dashboard:
+    enabled: false
+    port: 8890
+    auto_start: false
+    refresh_interval: 30s
+    show_worker_status: true
+    show_realtime_progress: true
+
+scheduler:
+  end_date: ""
+  batch_days: 7
+  max_concurrent_symbols: 10
+  timeline_cache_duration: 24h
+  auto_discover_symbols: false
+  show_startup_overview: false

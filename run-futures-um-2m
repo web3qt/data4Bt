@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+MODE="${1:---bg}" # --bg | --fg
+if [[ "$MODE" != "--bg" && "$MODE" != "--fg" ]]; then
+  echo "Usage: $0 [--bg|--fg]"
+  exit 1
+fi
+
+CONFIG_FILE="configs/config-futures-um-2m.yml"
+STATE_DIR="state/futures_um_2m"
+STATE_FILE="$STATE_DIR/progress.json"
+SYMBOLS_FILE="$STATE_DIR/symbols.txt"
+PID_FILE=".futures_um_2m_pid"
+STDOUT_LOG="logs/futures_um_2m.out"
+BINARY="./data4bt"
+
+# 对应 2026-01 和 2026-02 两个月。
+LAST_DATE="2025-12-01T00:00:00Z"
+NOW_UTC="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+mkdir -p "$STATE_DIR" logs
+
+for cmd in curl jq go; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "Missing dependency: $cmd"
+    exit 1
+  fi
+done
+
+if [[ ! -x "$BINARY" ]] || ! "$BINARY" -version >/dev/null 2>&1; then
+  echo "[0/3] Building binary ($BINARY)..."
+  CGO_ENABLED=0 go build -o "$BINARY" cmd/main.go
+fi
+
+echo "[1/3] Fetching all futures UM USDT symbols..."
+curl -fsSL "https://fapi.binance.com/fapi/v1/exchangeInfo" \
+  | jq -r '.symbols[] | select(.status=="TRADING" and (.symbol | endswith("USDT"))) | .symbol' \
+  | sort -u > "$SYMBOLS_FILE"
+
+SYMBOL_COUNT="$(wc -l < "$SYMBOLS_FILE" | tr -d ' ')"
+if [[ "$SYMBOL_COUNT" -eq 0 ]]; then
+  echo "No symbols found from Binance futures exchangeInfo."
+  exit 1
+fi
+echo "Symbols: $SYMBOL_COUNT"
+
+echo "[2/3] Building seeded state file: $STATE_FILE"
+jq -Rn --arg last "$LAST_DATE" --arg now "$NOW_UTC" '
+  reduce inputs as $s ({};
+    if ($s | length) == 0 then
+      .
+    else
+      .[$s] = {
+        symbol: $s,
+        last_date: $last,
+        total_files: 0,
+        processed: 0,
+        failed: 0,
+        last_updated: $now,
+        status: "pending",
+        worker_id: -1,
+        current_month: "",
+        error_message: "",
+        progress_percent: 0
+      }
+    end
+  )
+' < "$SYMBOLS_FILE" > "$STATE_FILE"
+
+echo "[3/3] Starting download with $CONFIG_FILE"
+if [[ "$MODE" == "--fg" ]]; then
+  exec "$BINARY" -cmd=update-latest -config="$CONFIG_FILE"
+else
+  nohup "$BINARY" -cmd=update-latest -config="$CONFIG_FILE" > "$STDOUT_LOG" 2>&1 &
+  PID="$!"
+  echo "$PID" > "$PID_FILE"
+  echo "Started in background. PID=$PID"
+  echo "Logs: $STDOUT_LOG"
+  echo "Watch: ./watch-futures-um-2m"
+fi

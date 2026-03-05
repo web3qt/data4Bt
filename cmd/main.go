@@ -409,7 +409,7 @@ type components struct {
 	parser           *parser.CSVParser
 	repository       *clickhouse.Repository
 	stateManager     *state.FileStateManager
-	progressReporter *monitor.ProgressReporter
+	progressReporter domain.ProgressReporter
 	importer         *importer.Importer
 	webMonitor       *webmonitor.WebMonitor
 }
@@ -464,7 +464,7 @@ func initializeComponents(cfg *config.Config) (*components, error) {
 	}
 
 	// 创建进度报告器
-	var progressReporter *monitor.ProgressReporter
+	var progressReporter domain.ProgressReporter
 	if cfg.Monitoring.Enabled {
 		progressReporter = monitor.NewProgressReporter(cfg.Monitoring)
 	}

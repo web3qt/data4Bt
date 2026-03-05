@@ -730,8 +730,19 @@ func (s *Scheduler) UpdateToLatest(ctx context.Context) error {
 		return fmt.Errorf("failed to get symbols: %w", err)
 	}
 
-	// 使用当前时间作为结束日期
-	endDate := time.Now().AddDate(0, 0, -1) // 昨天
+	// 优先使用配置中的结束日期（按月份对齐到当月1号），否则默认到“上个月第一天”
+	var endDate time.Time
+	if s.config.EndDate != "" {
+		parsedEnd, parseErr := time.Parse("2006-01-02", s.config.EndDate)
+		if parseErr != nil {
+			return fmt.Errorf("invalid scheduler end_date for update-latest: %w", parseErr)
+		}
+		endDate = time.Date(parsedEnd.Year(), parsedEnd.Month(), 1, 0, 0, 0, 0, time.UTC)
+	} else {
+		nowUTC := time.Now().UTC()
+		currentMonthStart := time.Date(nowUTC.Year(), nowUTC.Month(), 1, 0, 0, 0, 0, time.UTC)
+		endDate = currentMonthStart.AddDate(0, -1, 0)
+	}
 
 	var updateTasks []domain.DownloadTask
 
@@ -741,39 +752,42 @@ func (s *Scheduler) UpdateToLatest(ctx context.Context) error {
 		var startDate time.Time
 
 		if exists && !state.LastDate.IsZero() {
-			// 从上次处理的日期的下一个月开始
+			// 已有状态时直接按月份推进，避免为每个币种再次探测可用月份导致慢启动
 			startDate = state.LastDate.AddDate(0, 1, 0)
-		} else {
-			// 如果没有状态记录，从币安最早可用数据开始
-			availableDates, err := s.downloader.GetAvailableDates(ctx, symbol)
-			if err != nil {
-				s.logger.Warn().Err(err).Str("symbol", symbol).Msg("Failed to get available dates")
-				continue
+			startDate = time.Date(startDate.Year(), startDate.Month(), 1, 0, 0, 0, 0, time.UTC)
+
+			for current := startDate; !current.After(endDate); current = current.AddDate(0, 1, 0) {
+				updateTasks = append(updateTasks, domain.DownloadTask{
+					Symbol: symbol,
+					Date:   current,
+				})
 			}
-			if len(availableDates) == 0 {
-				continue
-			}
-			startDate = availableDates[0]
+			continue
 		}
 
-		// 生成从startDate到endDate的任务
-		for current := startDate; current.Before(endDate) || current.Equal(endDate); current = current.AddDate(0, 1, 0) {
-			// 检查这个月份的数据是否在币安可用
-			availableDates, err := s.downloader.GetAvailableDates(ctx, symbol)
-			if err != nil {
-				continue
-			}
+		// 缺少状态时再探测可用月份（单次请求），避免无状态币种生成无效超大任务集
+		availableDates, err := s.downloader.GetAvailableDates(ctx, symbol)
+		if err != nil {
+			s.logger.Warn().Err(err).Str("symbol", symbol).Msg("Failed to get available dates")
+			continue
+		}
+		if len(availableDates) == 0 {
+			continue
+		}
 
-			// 检查当前月份是否在可用日期列表中
-			found := false
-			for _, availableDate := range availableDates {
-				if availableDate.Year() == current.Year() && availableDate.Month() == current.Month() {
-					found = true
-					break
-				}
-			}
+		availableMonthSet := make(map[int]struct{}, len(availableDates))
+		for _, d := range availableDates {
+			availableMonthSet[d.Year()*100+int(d.Month())] = struct{}{}
+		}
 
-			if found {
+		// 无状态时从币安最早可用数据开始
+		startDate = availableDates[0]
+		startDate = time.Date(startDate.Year(), startDate.Month(), 1, 0, 0, 0, 0, time.UTC)
+
+		// 生成从 startDate 到 endDate 的任务
+		for current := startDate; !current.After(endDate); current = current.AddDate(0, 1, 0) {
+			key := current.Year()*100 + int(current.Month())
+			if _, ok := availableMonthSet[key]; ok {
 				updateTasks = append(updateTasks, domain.DownloadTask{
 					Symbol: symbol,
 					Date:   current,

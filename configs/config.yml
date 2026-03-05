@@ -11,6 +11,8 @@ log:
 binance:
   base_url: "https://data.binance.vision"
   data_path: "/data/spot/daily/klines"
+  market_type: "spot" # spot | futures_um | futures_cm
+  exchange_info_url: "" # 留空时按 market_type 自动选择
   symbols_filter: "USDT" # 只下载以USDT结尾的交易对
   interval: "1m"         # K线间隔
   timeout: 120s          # HTTP请求超时（增加到2分钟）

@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PID_FILE="$SCRIPT_DIR/.futures_um_2m_pid"
+STATE_FILE="$SCRIPT_DIR/state/futures_um_2m/progress.json"
+PROC_PATTERN='data4bt.*-cmd=update-latest.*configs/config-futures-um-2m.yml'
+
+INTERVAL=30
+ONCE=false
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./watch-futures-um-2m          # refresh every 30s
+  ./watch-futures-um-2m 10       # refresh every 10s
+  ./watch-futures-um-2m --once   # print once and exit
+EOF
+}
+
+if [[ $# -gt 1 ]]; then
+  usage
+  exit 1
+fi
+
+if [[ $# -eq 1 ]]; then
+  case "$1" in
+    --once)
+      ONCE=true
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      if [[ "$1" =~ ^[0-9]+$ ]] && [[ "$1" -gt 0 ]]; then
+        INTERVAL="$1"
+      else
+        echo "Invalid argument: $1"
+        usage
+        exit 1
+      fi
+      ;;
+  esac
+fi
+
+print_screen() {
+  if [[ -t 1 ]]; then
+    clear 2>/dev/null || true
+  fi
+  echo "=== Data4BT Futures-UM 2M Monitor  $(date '+%F %T') ==="
+
+  if [[ -f "$PID_FILE" ]]; then
+    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && ps -p "$pid" >/dev/null 2>&1; then
+      echo "Process: RUNNING"
+      ps -p "$pid" -o pid=,ppid=,etime=,%cpu=,%mem=,command=
+    else
+      found_pid="$(
+        ps -axo pid,command \
+          | grep -E "$PROC_PATTERN" \
+          | grep -v grep \
+          | awk 'NR==1{print $1}' \
+          || true
+      )"
+      if [[ -n "${found_pid:-}" ]] && ps -p "$found_pid" >/dev/null 2>&1; then
+        echo "$found_pid" > "$PID_FILE"
+        echo "Process: RUNNING (pid file refreshed)"
+        ps -p "$found_pid" -o pid=,ppid=,etime=,%cpu=,%mem=,command=
+      else
+        echo "Process: NOT RUNNING"
+      fi
+    fi
+  else
+    echo "Process: PID file missing ($PID_FILE)"
+  fi
+
+  if [[ -f "$STATE_FILE" ]]; then
+    jq -r '
+      to_entries as $e |
+      "Symbols: \($e|length)",
+      "Processed symbols: \($e|map(select((.value.processed // 0) > 0))|length)",
+      "Total processed months: \($e|map(.value.processed // 0)|add // 0)",
+      "Latest state update: \($e|map(.value.last_updated // "")|max)",
+      "",
+      "Top progress:",
+      (
+        $e
+        | map({
+            symbol: .key,
+            processed: (.value.processed // 0),
+            last_date: (.value.last_date // "")
+          })
+        | sort_by(.processed) | reverse | .[0:10]
+        | .[]
+        | "  \(.symbol)\tprocessed=\(.processed)\tlast_date=\(.last_date)"
+      )
+    ' "$STATE_FILE"
+  else
+    echo "State file missing: $STATE_FILE"
+  fi
+
+  if [[ "$ONCE" == "false" ]]; then
+    echo
+    echo "Refresh every ${INTERVAL}s. Ctrl+C to exit."
+  fi
+}
+
+while true; do
+  print_screen
+  if [[ "$ONCE" == "true" ]]; then
+    exit 0
+  fi
+  sleep "$INTERVAL"
+done
