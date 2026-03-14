@@ -259,8 +259,7 @@ func (s *Scheduler) generateTasksForSymbolWithEndDate(ctx context.Context, symbo
 		Str("symbol", symbol).
 		Msg("Fetching available monthly data from Binance")
 
-	// 直接从Binance获取该代币的所有可用月份
-	availableMonths, err := s.downloader.GetAvailableDates(ctx, symbol)
+	availableMonths, err := s.getAvailableMonthsForSymbol(ctx, symbol)
 	if err != nil {
 		s.logger.Error().
 			Err(err).
@@ -348,6 +347,26 @@ func (s *Scheduler) generateTasksForSymbolWithEndDate(ctx context.Context, symbo
 		Msg("Generated all monthly tasks in chronological order")
 
 	return tasks, nil
+}
+
+func (s *Scheduler) getAvailableMonthsForSymbol(ctx context.Context, symbol string) ([]time.Time, error) {
+	if s.stateManager != nil {
+		if timeline, err := s.stateManager.GetTimeline(symbol); err == nil && timeline != nil && len(timeline.AvailableMonths) > 0 {
+			availableMonths := make([]time.Time, 0, len(timeline.AvailableMonths))
+			for _, month := range timeline.AvailableMonths {
+				parsed, parseErr := time.Parse("2006-01", month)
+				if parseErr != nil {
+					continue
+				}
+				availableMonths = append(availableMonths, parsed)
+			}
+			if len(availableMonths) > 0 {
+				return availableMonths, nil
+			}
+		}
+	}
+
+	return s.downloader.GetAvailableDates(ctx, symbol)
 }
 
 // isDataAvailable 检查指定日期的数据是否可用

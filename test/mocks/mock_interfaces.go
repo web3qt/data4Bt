@@ -296,8 +296,18 @@ type MockRepository struct {
 	SaveFunc                   func(ctx context.Context, klines []domain.KLine) error
 	GetLastDateFunc            func(ctx context.Context, symbol string) (time.Time, error)
 	GetFirstDateFunc           func(ctx context.Context, symbol string) (time.Time, error)
+	GetBatchDateRangesFunc     func(ctx context.Context, symbols []string) (map[string]*domain.SymbolDateRange, error)
 	ValidateDataFunc           func(ctx context.Context, symbol string, date time.Time) (*domain.ValidationResult, error)
 	ClearAllDataFunc           func(ctx context.Context) error
+	SaveSymbolInfoFunc         func(ctx context.Context, symbolInfo *domain.SymbolInfo) error
+	GetSymbolInfoFunc          func(ctx context.Context, symbol string) (*domain.SymbolInfo, error)
+	GetAllSymbolInfosFunc      func(ctx context.Context) ([]*domain.SymbolInfo, error)
+	UpdateSymbolInfoFunc       func(ctx context.Context, symbolInfo *domain.SymbolInfo) error
+	GetMonthlyDataStatsFunc    func(ctx context.Context, symbol string, month time.Time) (int64, time.Time, time.Time, error)
+	CheckMonthlyDataExistenceFunc func(ctx context.Context, symbol string, months []string) (map[string]bool, error)
+	GetDataCompletenessForSymbolFunc func(ctx context.Context, symbol string, startMonth, endMonth string) (*domain.DataCompletenessStats, error)
+	QueryFunc                  func(ctx context.Context, query string, args ...interface{}) (interface{}, error)
+	DeleteDataInRangeFunc      func(ctx context.Context, symbol string, startTime, endTime time.Time) error
 	CreateMaterializedViewsFunc func(ctx context.Context, intervals []string) error
 	RefreshMaterializedViewsFunc func(ctx context.Context) error
 	CloseFunc                  func() error
@@ -331,6 +341,22 @@ func (m *MockRepository) GetFirstDate(ctx context.Context, symbol string) (time.
 	return time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), nil
 }
 
+func (m *MockRepository) GetBatchDateRanges(ctx context.Context, symbols []string) (map[string]*domain.SymbolDateRange, error) {
+	if m.GetBatchDateRangesFunc != nil {
+		return m.GetBatchDateRangesFunc(ctx, symbols)
+	}
+	result := make(map[string]*domain.SymbolDateRange, len(symbols))
+	for _, symbol := range symbols {
+		result[symbol] = &domain.SymbolDateRange{
+			Symbol:    symbol,
+			FirstDate: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+			LastDate:  time.Date(2024, 1, 31, 0, 0, 0, 0, time.UTC),
+			HasData:   true,
+		}
+	}
+	return result, nil
+}
+
 func (m *MockRepository) ValidateData(ctx context.Context, symbol string, date time.Time) (*domain.ValidationResult, error) {
 	if m.ValidateDataFunc != nil {
 		return m.ValidateDataFunc(ctx, symbol, date)
@@ -348,6 +374,87 @@ func (m *MockRepository) ValidateData(ctx context.Context, symbol string, date t
 func (m *MockRepository) ClearAllData(ctx context.Context) error {
 	if m.ClearAllDataFunc != nil {
 		return m.ClearAllDataFunc(ctx)
+	}
+	return nil
+}
+
+func (m *MockRepository) SaveSymbolInfo(ctx context.Context, symbolInfo *domain.SymbolInfo) error {
+	if m.SaveSymbolInfoFunc != nil {
+		return m.SaveSymbolInfoFunc(ctx, symbolInfo)
+	}
+	return nil
+}
+
+func (m *MockRepository) GetSymbolInfo(ctx context.Context, symbol string) (*domain.SymbolInfo, error) {
+	if m.GetSymbolInfoFunc != nil {
+		return m.GetSymbolInfoFunc(ctx, symbol)
+	}
+	return &domain.SymbolInfo{
+		Symbol:       symbol,
+		Status:       "TRADING",
+		QuoteAsset:   "USDT",
+		EarliestDate: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+		LatestDate:   time.Date(2024, 1, 31, 0, 0, 0, 0, time.UTC),
+		TotalMonths:  1,
+		DataStatus:   "completed",
+	}, nil
+}
+
+func (m *MockRepository) GetAllSymbolInfos(ctx context.Context) ([]*domain.SymbolInfo, error) {
+	if m.GetAllSymbolInfosFunc != nil {
+		return m.GetAllSymbolInfosFunc(ctx)
+	}
+	return []*domain.SymbolInfo{}, nil
+}
+
+func (m *MockRepository) UpdateSymbolInfo(ctx context.Context, symbolInfo *domain.SymbolInfo) error {
+	if m.UpdateSymbolInfoFunc != nil {
+		return m.UpdateSymbolInfoFunc(ctx, symbolInfo)
+	}
+	return nil
+}
+
+func (m *MockRepository) GetMonthlyDataStats(ctx context.Context, symbol string, month time.Time) (int64, time.Time, time.Time, error) {
+	if m.GetMonthlyDataStatsFunc != nil {
+		return m.GetMonthlyDataStatsFunc(ctx, symbol, month)
+	}
+	return 1440, month, month.AddDate(0, 1, 0).Add(-time.Minute), nil
+}
+
+func (m *MockRepository) CheckMonthlyDataExistence(ctx context.Context, symbol string, months []string) (map[string]bool, error) {
+	if m.CheckMonthlyDataExistenceFunc != nil {
+		return m.CheckMonthlyDataExistenceFunc(ctx, symbol, months)
+	}
+	result := make(map[string]bool, len(months))
+	for _, month := range months {
+		result[month] = false
+	}
+	return result, nil
+}
+
+func (m *MockRepository) GetDataCompletenessForSymbol(ctx context.Context, symbol string, startMonth, endMonth string) (*domain.DataCompletenessStats, error) {
+	if m.GetDataCompletenessForSymbolFunc != nil {
+		return m.GetDataCompletenessForSymbolFunc(ctx, symbol, startMonth, endMonth)
+	}
+	return &domain.DataCompletenessStats{
+		Symbol:               symbol,
+		TotalExpectedRecords: 0,
+		TotalActualRecords:   0,
+		CompletenessRatio:    0,
+		MonthlyStats:         map[string]*domain.MonthlyStats{},
+	}, nil
+}
+
+func (m *MockRepository) Query(ctx context.Context, query string, args ...interface{}) (interface{}, error) {
+	if m.QueryFunc != nil {
+		return m.QueryFunc(ctx, query, args...)
+	}
+	return nil, nil
+}
+
+func (m *MockRepository) DeleteDataInRange(ctx context.Context, symbol string, startTime, endTime time.Time) error {
+	if m.DeleteDataInRangeFunc != nil {
+		return m.DeleteDataInRangeFunc(ctx, symbol, startTime, endTime)
 	}
 	return nil
 }

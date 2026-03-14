@@ -24,6 +24,7 @@ import (
 type BinanceDownloader struct {
 	client            *http.Client
 	baseURL           string
+	listingBaseURL    string
 	dataPath          string
 	monthlyKlinesPath string
 	marketType        string
@@ -51,8 +52,8 @@ func NewBinanceDownloader(cfg config.BinanceConfig, downloaderCfg config.Downloa
 		Timeout: cfg.Timeout,
 	}
 
-	// 如果没有设置超时或超时太长，设置一个合理的默认超时
-	if client.Timeout == 0 || client.Timeout > 30*time.Second {
+	// 仅在未显式配置超时时使用默认值，避免大文件下载被错误截断
+	if client.Timeout == 0 {
 		client.Timeout = 30 * time.Second
 		log.Info().Dur("timeout", client.Timeout).Msg("Set HTTP client timeout for better responsiveness")
 	}
@@ -73,6 +74,7 @@ func NewBinanceDownloader(cfg config.BinanceConfig, downloaderCfg config.Downloa
 	return &BinanceDownloader{
 		client:            client,
 		baseURL:           strings.TrimRight(cfg.BaseURL, "/"),
+		listingBaseURL:    "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision",
 		dataPath:          cfg.DataPath,
 		monthlyKlinesPath: monthlyKlinesPath,
 		marketType:        marketType,
@@ -410,8 +412,78 @@ func (d *BinanceDownloader) BuildDownloadURL(symbol string, date time.Time) stri
 	return fmt.Sprintf("%s%s/%s/%s/%s", d.baseURL, d.monthlyKlinesPath, symbol, d.interval, filename)
 }
 
+func (d *BinanceDownloader) buildS3ListingURL(prefix string, delimiter string) string {
+	values := url.Values{}
+	values.Set("prefix", strings.TrimPrefix(prefix, "/"))
+	if delimiter != "" {
+		values.Set("delimiter", delimiter)
+	}
+	return fmt.Sprintf("%s?%s", strings.TrimRight(d.listingBaseURL, "/"), values.Encode())
+}
+
+func (d *BinanceDownloader) fetchS3Listing(ctx context.Context, prefix string, delimiter string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.buildS3ListingURL(prefix, delimiter), nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create S3 listing request: %w", err)
+	}
+	req.Header.Set("User-Agent", d.userAgent)
+
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to request S3 listing: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected S3 listing status code: %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read S3 listing body: %w", err)
+	}
+
+	return body, nil
+}
+
+func (d *BinanceDownloader) getAvailableDatesFromS3Listing(ctx context.Context, symbol string) ([]time.Time, error) {
+	prefix := fmt.Sprintf("%s/%s/%s/", strings.TrimPrefix(d.monthlyKlinesPath, "/"), symbol, d.interval)
+	body, err := d.fetchS3Listing(ctx, prefix, "")
+	if err != nil {
+		return nil, err
+	}
+
+	months := d.extractMonthsFromS3XML(string(body), symbol)
+	if len(months) == 0 {
+		return nil, fmt.Errorf("no monthly data found in S3 listing for %s", symbol)
+	}
+
+	dates := make([]time.Time, 0, len(months))
+	for _, monthStr := range months {
+		date, err := time.Parse("2006-01", monthStr)
+		if err != nil {
+			continue
+		}
+		dates = append(dates, date)
+	}
+	if len(dates) == 0 {
+		return nil, fmt.Errorf("no parseable monthly dates found in S3 listing for %s", symbol)
+	}
+
+	return dates, nil
+}
+
 // GetAvailableDates 获取指定交易对的可用月份
 func (d *BinanceDownloader) GetAvailableDates(ctx context.Context, symbol string) ([]time.Time, error) {
+	if dates, err := d.getAvailableDatesFromS3Listing(ctx, symbol); err == nil && len(dates) > 0 {
+		return dates, nil
+	} else if err != nil {
+		d.logger.Debug().
+			Str("symbol", symbol).
+			Err(err).
+			Msg("Falling back to HEAD-based available date discovery")
+	}
+
 	// 使用更高效的方法：先验证交易对存在，然后使用二分查找找到开始时间
 	now := time.Now()
 	currentDate := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)

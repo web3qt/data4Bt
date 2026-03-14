@@ -17,18 +17,75 @@ import (
 
 // Repository ClickHouse存储库
 type Repository struct {
-	conn   driver.Conn
-	config config.ClickHouseConfig
-	logger zerolog.Logger
+	conn              driver.Conn
+	config            config.ClickHouseConfig
+	logger            zerolog.Logger
+	baseTable         string
+	connectedDatabase string
 }
 
 // NewRepository 创建新的ClickHouse存储库
 func NewRepository(cfg config.ClickHouseConfig) (*Repository, error) {
-	// 构建连接选项
+	conn, connectedDatabase, err := openRepositoryConnection(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	repository := &Repository{
+		conn:              conn,
+		config:            cfg,
+		logger:            logger.GetLogger("clickhouse_repository"),
+		baseTable:         normalizeBaseTable(cfg.BaseTable),
+		connectedDatabase: connectedDatabase,
+	}
+
+	repository.logger.Info().
+		Strs("hosts", cfg.Hosts).
+		Str("database", cfg.Database).
+		Str("connected_database", connectedDatabase).
+		Str("base_table", repository.baseTable).
+		Msg("Connected to ClickHouse")
+
+	return repository, nil
+}
+
+func openRepositoryConnection(cfg config.ClickHouseConfig) (driver.Conn, string, error) {
+	conn, err := openClickHouseConnection(cfg, cfg.Database)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to connect to ClickHouse: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := conn.Ping(ctx); err == nil {
+		return conn, cfg.Database, nil
+	} else if !shouldFallbackToDefaultDatabase(err) {
+		conn.Close()
+		return nil, "", fmt.Errorf("failed to ping ClickHouse: %w", err)
+	}
+
+	conn.Close()
+
+	fallbackDatabase := "default"
+	fallbackConn, err := openClickHouseConnection(cfg, fallbackDatabase)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to connect to ClickHouse fallback database: %w", err)
+	}
+
+	if err := fallbackConn.Ping(ctx); err != nil {
+		fallbackConn.Close()
+		return nil, "", fmt.Errorf("failed to ping ClickHouse fallback database: %w", err)
+	}
+
+	return fallbackConn, fallbackDatabase, nil
+}
+
+func openClickHouseConnection(cfg config.ClickHouseConfig, database string) (driver.Conn, error) {
 	options := &clickhouse.Options{
 		Addr: cfg.Hosts,
 		Auth: clickhouse.Auth{
-			Database: cfg.Database,
+			Database: database,
 			Username: cfg.Username,
 			Password: cfg.Password,
 		},
@@ -38,8 +95,7 @@ func NewRepository(cfg config.ClickHouseConfig) (*Repository, error) {
 		ConnMaxLifetime: cfg.ConnMaxLifetime,
 		Settings:        make(clickhouse.Settings),
 	}
-	
-	// 设置压缩
+
 	if cfg.Compression != "" && cfg.Compression != "none" {
 		switch strings.ToLower(cfg.Compression) {
 		case "lz4":
@@ -48,38 +104,76 @@ func NewRepository(cfg config.ClickHouseConfig) (*Repository, error) {
 			options.Compression = &clickhouse.Compression{Method: clickhouse.CompressionZSTD}
 		}
 	}
-	
-	// 设置数据库设置
+
 	for key, value := range cfg.Settings {
 		options.Settings[key] = value
 	}
-	
-	// 建立连接
-	conn, err := clickhouse.Open(options)
+
+	return clickhouse.Open(options)
+}
+
+func normalizeBaseTable(raw string) string {
+	baseTable := strings.TrimSpace(raw)
+	if baseTable == "" {
+		return "klines_1m"
+	}
+	return baseTable
+}
+
+func shouldFallbackToDefaultDatabase(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database") && strings.Contains(msg, "does not exist")
+}
+
+func (r *Repository) reconnectToConfiguredDatabase(ctx context.Context) error {
+	if r.connectedDatabase == r.config.Database {
+		return nil
+	}
+
+	conn, err := openClickHouseConnection(r.config, r.config.Database)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to ClickHouse: %w", err)
+		return fmt.Errorf("failed to reconnect to configured database: %w", err)
 	}
-	
-	// 测试连接
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	
 	if err := conn.Ping(ctx); err != nil {
-		return nil, fmt.Errorf("failed to ping ClickHouse: %w", err)
+		conn.Close()
+		return fmt.Errorf("failed to ping configured database: %w", err)
 	}
-	
-	repository := &Repository{
-		conn:   conn,
-		config: cfg,
-		logger: logger.GetLogger("clickhouse_repository"),
+
+	if r.conn != nil {
+		_ = r.conn.Close()
 	}
-	
-	repository.logger.Info().
-		Strs("hosts", cfg.Hosts).
-		Str("database", cfg.Database).
-		Msg("Connected to ClickHouse")
-	
-	return repository, nil
+
+	r.conn = conn
+	r.connectedDatabase = r.config.Database
+	return nil
+}
+
+func (r *Repository) baseIntervalDuration() time.Duration {
+	return intervalDuration(strings.TrimPrefix(r.baseTable, "klines_"))
+}
+
+func intervalDuration(interval string) time.Duration {
+	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "1s":
+		return time.Second
+	case "5m":
+		return 5 * time.Minute
+	case "15m":
+		return 15 * time.Minute
+	case "1h":
+		return time.Hour
+	case "4h":
+		return 4 * time.Hour
+	case "1d":
+		return 24 * time.Hour
+	case "", "1m":
+		return time.Minute
+	default:
+		return time.Minute
+	}
 }
 
 // Save 批量保存K线数据
@@ -87,7 +181,17 @@ func (r *Repository) Save(ctx context.Context, klines []domain.KLine) error {
 	if len(klines) == 0 {
 		return nil
 	}
-	
+
+	for _, groupedBatch := range groupKLinesBySymbol(klines) {
+		if err := r.saveSingleSymbolBatch(ctx, groupedBatch); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (r *Repository) saveSingleSymbolBatch(ctx context.Context, klines []domain.KLine) error {
 	start := time.Now()
 	defer func() {
 		logger.LogPerformance("clickhouse_repository", "save", time.Since(start), map[string]interface{}{
@@ -95,21 +199,33 @@ func (r *Repository) Save(ctx context.Context, klines []domain.KLine) error {
 			"symbol":     klines[0].Symbol,
 		})
 	}()
-	
+
+	filteredKlines, err := r.filterExistingKLines(ctx, klines)
+	if err != nil {
+		return fmt.Errorf("failed to filter existing klines: %w", err)
+	}
+	if len(filteredKlines) == 0 {
+		r.logger.Debug().
+			Str("symbol", klines[0].Symbol).
+			Int("count", len(klines)).
+			Msg("All klines already exist, skipping insert")
+		return nil
+	}
+
 	// 准备批量插入
-	batch, err := r.conn.PrepareBatch(ctx, `
-		INSERT INTO klines_1m (
+	batch, err := r.conn.PrepareBatch(ctx, fmt.Sprintf(`
+		INSERT INTO %s (
 			symbol, open_time, close_time, open_price, high_price, low_price, 
 			close_price, volume, quote_asset_volume, number_of_trades, 
 			taker_buy_base_volume, taker_buy_quote_volume, interval, created_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`)
+	`, r.baseTable))
 	if err != nil {
 		return fmt.Errorf("failed to prepare batch: %w", err)
 	}
-	
+
 	// 添加数据到批次
-	for _, kline := range klines {
+	for _, kline := range filteredKlines {
 		err := batch.Append(
 			kline.Symbol,
 			kline.OpenTime,
@@ -130,61 +246,133 @@ func (r *Repository) Save(ctx context.Context, klines []domain.KLine) error {
 			return fmt.Errorf("failed to append to batch: %w", err)
 		}
 	}
-	
+
 	// 执行批量插入
 	if err := batch.Send(); err != nil {
 		return fmt.Errorf("failed to send batch: %w", err)
 	}
-	
+
 	r.logger.Debug().
-		Int("count", len(klines)).
-		Str("symbol", klines[0].Symbol).
+		Int("count", len(filteredKlines)).
+		Int("skipped_existing", len(klines)-len(filteredKlines)).
+		Str("symbol", filteredKlines[0].Symbol).
 		Msg("Batch inserted successfully")
-	
+
 	return nil
+}
+
+func groupKLinesBySymbol(klines []domain.KLine) [][]domain.KLine {
+	if len(klines) == 0 {
+		return nil
+	}
+
+	order := make([]string, 0, len(klines))
+	grouped := make(map[string][]domain.KLine)
+	for _, kline := range klines {
+		if _, exists := grouped[kline.Symbol]; !exists {
+			order = append(order, kline.Symbol)
+		}
+		grouped[kline.Symbol] = append(grouped[kline.Symbol], kline)
+	}
+
+	result := make([][]domain.KLine, 0, len(order))
+	for _, symbol := range order {
+		result = append(result, grouped[symbol])
+	}
+	return result
+}
+
+func (r *Repository) filterExistingKLines(ctx context.Context, klines []domain.KLine) ([]domain.KLine, error) {
+	if len(klines) == 0 {
+		return nil, nil
+	}
+
+	symbol := klines[0].Symbol
+	minOpenTime := klines[0].OpenTime
+	maxOpenTime := klines[0].OpenTime
+	for _, kline := range klines[1:] {
+		if kline.OpenTime.Before(minOpenTime) {
+			minOpenTime = kline.OpenTime
+		}
+		if kline.OpenTime.After(maxOpenTime) {
+			maxOpenTime = kline.OpenTime
+		}
+	}
+
+	rows, err := r.conn.Query(ctx, fmt.Sprintf(`
+		SELECT open_time
+		FROM %s
+		WHERE symbol = ? AND open_time >= ? AND open_time <= ?
+	`, r.baseTable), symbol, minOpenTime, maxOpenTime)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query existing open times: %w", err)
+	}
+	defer rows.Close()
+
+	existing := make(map[int64]struct{})
+	for rows.Next() {
+		var openTime time.Time
+		if err := rows.Scan(&openTime); err != nil {
+			return nil, fmt.Errorf("failed to scan existing open time: %w", err)
+		}
+		existing[openTime.UTC().UnixMilli()] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate existing open times: %w", err)
+	}
+
+	filtered := make([]domain.KLine, 0, len(klines))
+	for _, kline := range klines {
+		if _, ok := existing[kline.OpenTime.UTC().UnixMilli()]; ok {
+			continue
+		}
+		filtered = append(filtered, kline)
+	}
+
+	return filtered, nil
 }
 
 // GetLastDate 获取指定交易对的最后日期
 func (r *Repository) GetLastDate(ctx context.Context, symbol string) (time.Time, error) {
 	// 首先检查是否有数据
 	var count uint64
-	countQuery := `SELECT count(*) FROM klines_1m WHERE symbol = ?`
+	countQuery := fmt.Sprintf(`SELECT count(*) FROM %s WHERE symbol = ?`, r.baseTable)
 	row := r.conn.QueryRow(ctx, countQuery, symbol)
 	if err := row.Scan(&count); err != nil {
 		return time.Time{}, fmt.Errorf("failed to count records: %w", err)
 	}
-	
+
 	// 如果没有数据，返回零值
 	if count == 0 {
 		return time.Time{}, nil
 	}
-	
+
 	// 有数据时才查询最大日期
 	var lastDate time.Time
-	query := `
+	query := fmt.Sprintf(`
 		SELECT max(toDate(open_time)) as last_date 
-		FROM klines_1m 
+		FROM %s 
 		WHERE symbol = ?
-	`
-	
+	`, r.baseTable)
+
 	row = r.conn.QueryRow(ctx, query, symbol)
 	if err := row.Scan(&lastDate); err != nil {
 		return time.Time{}, fmt.Errorf("failed to get last date: %w", err)
 	}
-	
+
 	return lastDate, nil
 }
 
 // GetFirstDate 获取指定交易对的最早日期
 func (r *Repository) GetFirstDate(ctx context.Context, symbol string) (time.Time, error) {
 	var firstDate time.Time
-	
-	query := `
+
+	query := fmt.Sprintf(`
 		SELECT min(toDate(open_time)) as first_date 
-		FROM klines_1m 
+		FROM %s 
 		WHERE symbol = ?
-	`
-	
+	`, r.baseTable)
+
 	row := r.conn.QueryRow(ctx, query, symbol)
 	if err := row.Scan(&firstDate); err != nil {
 		if err.Error() == "sql: no rows in result set" {
@@ -193,7 +381,7 @@ func (r *Repository) GetFirstDate(ctx context.Context, symbol string) (time.Time
 		}
 		return time.Time{}, fmt.Errorf("failed to get first date: %w", err)
 	}
-	
+
 	return firstDate, nil
 }
 
@@ -203,10 +391,10 @@ func (r *Repository) GetBatchDateRanges(ctx context.Context, symbols []string) (
 	if len(symbols) == 0 {
 		return make(map[string]*domain.SymbolDateRange), nil
 	}
-	
+
 	// 创建结果映射
 	results := make(map[string]*domain.SymbolDateRange)
-	
+
 	// 初始化所有交易对的结果，默认为无数据
 	for _, symbol := range symbols {
 		results[symbol] = &domain.SymbolDateRange{
@@ -214,45 +402,45 @@ func (r *Repository) GetBatchDateRanges(ctx context.Context, symbols []string) (
 			HasData: false,
 		}
 	}
-	
+
 	// 构建批量查询SQL
 	// 使用单个查询获取所有交易对的时间范围
-	query := `
+	query := fmt.Sprintf(`
 		SELECT 
 			symbol,
 			min(toDate(open_time)) as first_date,
 			max(toDate(open_time)) as last_date,
 			count(*) as record_count
-		FROM klines_1m 
-		WHERE symbol IN (` + r.buildInClause(len(symbols)) + `)
+		FROM %s 
+		WHERE symbol IN (`+r.buildInClause(len(symbols))+`)
 		GROUP BY symbol
 		HAVING record_count > 0
-	`
-	
+	`, r.baseTable)
+
 	// 准备查询参数
 	args := make([]interface{}, len(symbols))
 	for i, symbol := range symbols {
 		args[i] = symbol
 	}
-	
+
 	// 执行查询
 	rows, err := r.conn.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute batch date ranges query: %w", err)
 	}
 	defer rows.Close()
-	
+
 	// 处理查询结果
 	for rows.Next() {
 		var symbol string
 		var firstDate, lastDate time.Time
 		var recordCount uint64
-		
+
 		if err := rows.Scan(&symbol, &firstDate, &lastDate, &recordCount); err != nil {
 			r.logger.Warn().Err(err).Str("symbol", symbol).Msg("Failed to scan date range row")
 			continue
 		}
-		
+
 		// 更新结果
 		if result, exists := results[symbol]; exists {
 			result.FirstDate = firstDate
@@ -260,16 +448,16 @@ func (r *Repository) GetBatchDateRanges(ctx context.Context, symbols []string) (
 			result.HasData = recordCount > 0
 		}
 	}
-	
+
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("error iterating over date range results: %w", err)
 	}
-	
+
 	r.logger.Info().
 		Int("requested_symbols", len(symbols)).
 		Int("symbols_with_data", r.countSymbolsWithData(results)).
 		Msg("Batch date ranges query completed")
-	
+
 	return results, nil
 }
 
@@ -278,12 +466,12 @@ func (r *Repository) buildInClause(count int) string {
 	if count == 0 {
 		return ""
 	}
-	
+
 	placeholders := make([]string, count)
 	for i := 0; i < count; i++ {
 		placeholders[i] = "?"
 	}
-	
+
 	return strings.Join(placeholders, ",")
 }
 
@@ -298,25 +486,93 @@ func (r *Repository) countSymbolsWithData(results map[string]*domain.SymbolDateR
 	return count
 }
 
+// GetExistingDailyCoverage returns the UTC dates that already exist for each symbol in the requested window.
+func (r *Repository) GetExistingDailyCoverage(ctx context.Context, symbols []string, startDay, endDay time.Time) (map[string]map[string]struct{}, error) {
+	if len(symbols) == 0 {
+		return map[string]map[string]struct{}{}, nil
+	}
+
+	results := make(map[string]map[string]struct{}, len(symbols))
+	for _, symbol := range symbols {
+		results[symbol] = make(map[string]struct{})
+	}
+
+	start := time.Date(startDay.UTC().Year(), startDay.UTC().Month(), startDay.UTC().Day(), 0, 0, 0, 0, time.UTC)
+	endExclusive := time.Date(endDay.UTC().Year(), endDay.UTC().Month(), endDay.UTC().Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
+
+	query := fmt.Sprintf(`
+		SELECT
+			symbol,
+			toDate(open_time) AS trade_day
+		FROM %s
+		WHERE symbol IN (`+r.buildInClause(len(symbols))+`)
+		  AND open_time >= ?
+		  AND open_time < ?
+		GROUP BY symbol, trade_day
+	`, r.baseTable)
+
+	args := make([]interface{}, 0, len(symbols)+2)
+	for _, symbol := range symbols {
+		args = append(args, symbol)
+	}
+	args = append(args, start, endExclusive)
+
+	rows, err := r.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute existing daily coverage query: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var symbol string
+		var tradeDay time.Time
+
+		if err := rows.Scan(&symbol, &tradeDay); err != nil {
+			return nil, fmt.Errorf("failed to scan existing daily coverage row: %w", err)
+		}
+
+		if _, exists := results[symbol]; !exists {
+			results[symbol] = make(map[string]struct{})
+		}
+		results[symbol][tradeDay.UTC().Format("2006-01-02")] = struct{}{}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over existing daily coverage rows: %w", err)
+	}
+
+	r.logger.Info().
+		Int("requested_symbols", len(symbols)).
+		Str("start_day", start.Format("2006-01-02")).
+		Str("end_day", endExclusive.AddDate(0, 0, -1).Format("2006-01-02")).
+		Msg("Existing daily coverage query completed")
+
+	return results, nil
+}
+
 // CreateTables 创建数据表
 func (r *Repository) CreateTables(ctx context.Context) error {
 	r.logger.Info().Msg("Creating ClickHouse tables")
-	
+
 	// 创建数据库（如果不存在）
 	if err := r.createDatabase(ctx); err != nil {
 		return fmt.Errorf("failed to create database: %w", err)
 	}
-	
+
+	if err := r.reconnectToConfiguredDatabase(ctx); err != nil {
+		return fmt.Errorf("failed to switch to configured database: %w", err)
+	}
+
 	// 创建1分钟K线表
 	if err := r.createKlineTable(ctx); err != nil {
 		return fmt.Errorf("failed to create kline table: %w", err)
 	}
-	
+
 	// 创建交易对信息表
 	if err := r.createSymbolInfoTable(ctx); err != nil {
 		return fmt.Errorf("failed to create symbol info table: %w", err)
 	}
-	
+
 	r.logger.Info().Msg("Tables created successfully")
 	return nil
 }
@@ -324,13 +580,13 @@ func (r *Repository) CreateTables(ctx context.Context) error {
 // CreateMaterializedViews 创建物化视图
 func (r *Repository) CreateMaterializedViews(ctx context.Context, intervals []string) error {
 	r.logger.Info().Strs("intervals", intervals).Msg("Creating materialized views")
-	
+
 	for _, interval := range intervals {
 		if err := r.createMaterializedView(ctx, interval); err != nil {
 			return fmt.Errorf("failed to create materialized view for %s: %w", interval, err)
 		}
 	}
-	
+
 	r.logger.Info().Msg("Materialized views created successfully")
 	return nil
 }
@@ -342,13 +598,13 @@ func (r *Repository) PopulateMaterializedViews(ctx context.Context, intervals []
 	} else {
 		r.logger.Info().Strs("intervals", intervals).Msg("Populating materialized views with historical data for all symbols")
 	}
-	
+
 	for _, interval := range intervals {
 		if err := r.populateMaterializedView(ctx, interval, symbols); err != nil {
 			return fmt.Errorf("failed to populate materialized view for %s: %w", interval, err)
 		}
 	}
-	
+
 	r.logger.Info().Msg("Materialized views populated successfully")
 	return nil
 }
@@ -357,41 +613,41 @@ func (r *Repository) PopulateMaterializedViews(ctx context.Context, intervals []
 func (r *Repository) RefreshMaterializedViews(ctx context.Context) error {
 	// ClickHouse的物化视图是自动更新的，这里可以执行一些优化操作
 	intervals := []string{"5m", "15m", "1h", "4h", "1d"}
-	
+
 	for _, interval := range intervals {
 		tableName := fmt.Sprintf("klines_%s", interval)
-		
+
 		// 优化表
 		query := fmt.Sprintf("OPTIMIZE TABLE %s FINAL", tableName)
 		if err := r.conn.Exec(ctx, query); err != nil {
 			r.logger.Warn().Err(err).Str("table", tableName).Msg("Failed to optimize table")
 		}
 	}
-	
+
 	return nil
 }
 
 // ValidateData 验证数据完整性
 func (r *Repository) ValidateData(ctx context.Context, symbol string, date time.Time) (*domain.ValidationResult, error) {
 	dateStr := date.Format("2006-01-02")
-	
+
 	// 查询指定日期的数据统计
-	query := `
+	query := fmt.Sprintf(`
 		SELECT 
 			count(*) as total_rows,
 			countIf(open_price > 0 AND high_price > 0 AND low_price > 0 AND close_price > 0) as valid_price_rows,
 			countIf(volume >= 0) as valid_volume_rows,
 			countIf(open_time < close_time) as valid_time_rows
-		FROM klines_1m 
+		FROM %s 
 		WHERE symbol = ? AND toDate(open_time) = ?
-	`
-	
+	`, r.baseTable)
+
 	var totalRows, validPriceRows, validVolumeRows, validTimeRows uint64
 	row := r.conn.QueryRow(ctx, query, symbol, dateStr)
 	if err := row.Scan(&totalRows, &validPriceRows, &validVolumeRows, &validTimeRows); err != nil {
 		return nil, fmt.Errorf("failed to validate data: %w", err)
 	}
-	
+
 	// 计算有效行数（所有条件都满足）
 	validRows := validPriceRows
 	if validVolumeRows < validRows {
@@ -400,9 +656,9 @@ func (r *Repository) ValidateData(ctx context.Context, symbol string, date time.
 	if validTimeRows < validRows {
 		validRows = validTimeRows
 	}
-	
+
 	invalidRows := totalRows - validRows
-	
+
 	result := &domain.ValidationResult{
 		Valid:       invalidRows == 0,
 		TotalRows:   int(totalRows),
@@ -411,7 +667,7 @@ func (r *Repository) ValidateData(ctx context.Context, symbol string, date time.
 		Errors:      []string{},
 		Warnings:    []string{},
 	}
-	
+
 	// 添加警告信息
 	if validPriceRows < totalRows {
 		result.Warnings = append(result.Warnings, fmt.Sprintf("%d rows have invalid prices", totalRows-validPriceRows))
@@ -422,26 +678,26 @@ func (r *Repository) ValidateData(ctx context.Context, symbol string, date time.
 	if validTimeRows < totalRows {
 		result.Warnings = append(result.Warnings, fmt.Sprintf("%d rows have invalid time", totalRows-validTimeRows))
 	}
-	
+
 	// 检查数据完整性（1分钟数据应该有1440条记录）
-	expectedRows := 1440 // 24 * 60
+	expectedRows := int((24 * time.Hour) / r.baseIntervalDuration())
 	if int(totalRows) < expectedRows {
 		result.Warnings = append(result.Warnings, fmt.Sprintf("Expected %d rows but got %d", expectedRows, totalRows))
 	}
-	
+
 	return result, nil
 }
 
 // ClearAllData 清空所有数据表
 func (r *Repository) ClearAllData(ctx context.Context) error {
 	r.logger.Info().Msg("Clearing all data from database")
-	
+
 	// 清空主表
-	if err := r.conn.Exec(ctx, "TRUNCATE TABLE IF EXISTS klines_1m"); err != nil {
-		r.logger.Error().Err(err).Msg("Failed to truncate klines_1m table")
-		return fmt.Errorf("failed to truncate klines_1m: %w", err)
+	if err := r.conn.Exec(ctx, fmt.Sprintf("TRUNCATE TABLE IF EXISTS %s", r.baseTable)); err != nil {
+		r.logger.Error().Err(err).Str("table", r.baseTable).Msg("Failed to truncate base table")
+		return fmt.Errorf("failed to truncate %s: %w", r.baseTable, err)
 	}
-	
+
 	// 清空物化视图对应的表
 	intervals := []string{"5m", "15m", "1h", "4h", "1d"}
 	for _, interval := range intervals {
@@ -452,7 +708,7 @@ func (r *Repository) ClearAllData(ctx context.Context) error {
 			// 继续处理其他表，不返回错误
 		}
 	}
-	
+
 	r.logger.Info().Msg("All data cleared successfully")
 	return nil
 }
@@ -473,8 +729,8 @@ func (r *Repository) createDatabase(ctx context.Context) error {
 
 // createKlineTable 创建K线表
 func (r *Repository) createKlineTable(ctx context.Context) error {
-	query := `
-		CREATE TABLE IF NOT EXISTS klines_1m (
+	query := fmt.Sprintf(`
+		CREATE TABLE IF NOT EXISTS %s (
 			symbol String,
 			open_time DateTime64(3),
 			close_time DateTime64(3),
@@ -493,8 +749,8 @@ func (r *Repository) createKlineTable(ctx context.Context) error {
 		PARTITION BY (symbol, toYYYYMM(open_time))
 		ORDER BY (symbol, open_time)
 		SETTINGS index_granularity = 8192
-	`
-	
+	`, r.baseTable)
+
 	return r.conn.Exec(ctx, query)
 }
 
@@ -516,7 +772,7 @@ func (r *Repository) createSymbolInfoTable(ctx context.Context) error {
 		ORDER BY symbol
 		SETTINGS index_granularity = 8192
 	`
-	
+
 	return r.conn.Exec(ctx, query)
 }
 
@@ -524,7 +780,7 @@ func (r *Repository) createSymbolInfoTable(ctx context.Context) error {
 func (r *Repository) createMaterializedView(ctx context.Context, interval string) error {
 	tableName := fmt.Sprintf("klines_%s", interval)
 	viewName := fmt.Sprintf("klines_%s_mv", interval)
-	
+
 	// 首先创建目标表
 	createTableQuery := fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS %s (
@@ -547,14 +803,14 @@ func (r *Repository) createMaterializedView(ctx context.Context, interval string
 		ORDER BY (symbol, open_time)
 		SETTINGS index_granularity = 8192
 	`, tableName)
-	
+
 	if err := r.conn.Exec(ctx, createTableQuery); err != nil {
 		return fmt.Errorf("failed to create table %s: %w", tableName, err)
 	}
-	
+
 	// 获取时间间隔的分钟数
 	intervalMinutes := r.getIntervalMinutes(interval)
-	
+
 	// 创建物化视图 - 使用简化的GROUP BY语法避免优化器问题
 	createViewQuery := fmt.Sprintf(`
 		CREATE MATERIALIZED VIEW IF NOT EXISTS %s TO %s AS
@@ -576,13 +832,13 @@ func (r *Repository) createMaterializedView(ctx context.Context, interval string
 		FROM (
 			SELECT *,
 				   toStartOfInterval(open_time, toIntervalMinute(%d)) as grouped_time
-			FROM klines_1m
+			FROM %s
 		)
 		GROUP BY symbol, grouped_time
-	`, viewName, tableName, intervalMinutes, interval, intervalMinutes)
-	
+	`, viewName, tableName, intervalMinutes, interval, intervalMinutes, r.baseTable)
+
 	r.logger.Debug().Str("interval", interval).Str("query", createViewQuery).Msg("Creating materialized view")
-	
+
 	return r.conn.Exec(ctx, createViewQuery)
 }
 
@@ -608,17 +864,17 @@ func (r *Repository) getIntervalMinutes(interval string) int {
 func (r *Repository) populateMaterializedView(ctx context.Context, interval string, symbols []string) error {
 	tableName := fmt.Sprintf("klines_%s", interval)
 	intervalMinutes := r.getIntervalMinutes(interval)
-	
+
 	if len(symbols) > 0 {
 		r.logger.Info().Str("interval", interval).Str("table", tableName).Strs("symbols", symbols).Msg("Populating materialized view with historical data for specific symbols")
 	} else {
 		r.logger.Info().Str("interval", interval).Str("table", tableName).Msg("Populating materialized view with historical data for all symbols")
 	}
-	
+
 	// 构建时间范围查询（可能需要根据symbols过滤）
 	var timeQuery string
 	var args []interface{}
-	
+
 	if len(symbols) > 0 {
 		// 构建symbol过滤条件
 		symbolPlaceholders := make([]string, len(symbols))
@@ -626,33 +882,34 @@ func (r *Repository) populateMaterializedView(ctx context.Context, interval stri
 			symbolPlaceholders[i] = "?"
 			args = append(args, symbol)
 		}
-		timeQuery = fmt.Sprintf("SELECT min(open_time), max(open_time) FROM klines_1m WHERE symbol IN (%s)", 
+		timeQuery = fmt.Sprintf("SELECT min(open_time), max(open_time) FROM %s WHERE symbol IN (%s)",
+			r.baseTable,
 			strings.Join(symbolPlaceholders, ","))
 	} else {
-		timeQuery = "SELECT min(open_time), max(open_time) FROM klines_1m"
+		timeQuery = fmt.Sprintf("SELECT min(open_time), max(open_time) FROM %s", r.baseTable)
 	}
-	
+
 	// 获取数据的时间范围
 	var minTime, maxTime time.Time
 	row := r.conn.QueryRow(ctx, timeQuery, args...)
 	if err := row.Scan(&minTime, &maxTime); err != nil {
 		return fmt.Errorf("failed to get time range: %w", err)
 	}
-	
+
 	r.logger.Info().Time("min_time", minTime).Time("max_time", maxTime).Msg("Data time range")
-	
+
 	// 按月分批处理，避免内存溢出
 	batchCount := 0
 	for current := time.Date(minTime.Year(), minTime.Month(), 1, 0, 0, 0, 0, time.UTC); current.Before(maxTime); current = current.AddDate(0, 1, 0) {
 		nextMonth := current.AddDate(0, 1, 0)
-		
+
 		r.logger.Info().Time("batch_start", current).Time("batch_end", nextMonth).Msg("Processing batch")
-		
+
 		// 设置分区限制以处理大量交易对
 		if err := r.conn.Exec(ctx, "SET max_partitions_per_insert_block = 1000"); err != nil {
 			r.logger.Warn().Err(err).Msg("Failed to set partition limit")
 		}
-		
+
 		// 构建WHERE子句
 		var whereClause string
 		if len(symbols) > 0 {
@@ -667,7 +924,7 @@ func (r *Repository) populateMaterializedView(ctx context.Context, interval stri
 			whereClause = fmt.Sprintf("WHERE open_time >= '%s' AND open_time < '%s'",
 				current.Format("2006-01-02 15:04:05"), nextMonth.Format("2006-01-02 15:04:05"))
 		}
-		
+
 		populateQuery := fmt.Sprintf(`
 			INSERT INTO %s
 			SELECT 
@@ -688,21 +945,21 @@ func (r *Repository) populateMaterializedView(ctx context.Context, interval stri
 			FROM (
 				SELECT *,
 					   toStartOfInterval(open_time, toIntervalMinute(%d)) as grouped_time
-				FROM klines_1m
+				FROM %s
 				%s
 			)
 			GROUP BY symbol, grouped_time
-		`, tableName, intervalMinutes, interval, intervalMinutes, whereClause)
-		
+		`, tableName, intervalMinutes, interval, intervalMinutes, r.baseTable, whereClause)
+
 		if err := r.conn.Exec(ctx, populateQuery); err != nil {
 			r.logger.Error().Err(err).Time("batch_start", current).Msg("Failed to populate batch")
 			return fmt.Errorf("failed to populate table %s for batch %s: %w", tableName, current.Format("2006-01"), err)
 		}
-		
+
 		batchCount++
 		r.logger.Info().Time("batch_start", current).Int("batch_number", batchCount).Msg("Batch completed")
 	}
-	
+
 	r.logger.Info().Str("interval", interval).Str("table", tableName).Int("total_batches", batchCount).Msg("Materialized view populated successfully")
 	return nil
 }
@@ -722,13 +979,13 @@ func (r *Repository) SaveSymbolInfo(ctx context.Context, symbolInfo *domain.Symb
 			quoteAsset = "UNKNOWN"
 		}
 	}
-	
+
 	// 检查记录是否已存在
 	existingInfo, err := r.GetSymbolInfo(ctx, symbolInfo.Symbol)
 	if err != nil && err.Error() != "sql: no rows in result set" {
 		return fmt.Errorf("failed to check existing symbol info: %w", err)
 	}
-	
+
 	if existingInfo != nil {
 		// 更新现有记录
 		updateQuery := `
@@ -781,10 +1038,10 @@ func (r *Repository) GetSymbolInfo(ctx context.Context, symbol string) (*domain.
 		FROM symbol_infos
 		WHERE symbol = ?
 	`
-	
+
 	var info domain.SymbolInfo
 	row := r.conn.QueryRow(ctx, query, symbol)
-	
+
 	err := row.Scan(
 		&info.Symbol,
 		&info.Status,
@@ -797,11 +1054,11 @@ func (r *Repository) GetSymbolInfo(ctx context.Context, symbol string) (*domain.
 		&info.CreatedAt,
 		&info.UpdatedAt,
 	)
-	
+
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return &info, nil
 }
 
@@ -810,28 +1067,28 @@ func (r *Repository) GetMonthlyDataStats(ctx context.Context, symbol string, mon
 	// 计算月份的开始和结束时间
 	startOfMonth := time.Date(month.Year(), month.Month(), 1, 0, 0, 0, 0, time.UTC)
 	endOfMonth := startOfMonth.AddDate(0, 1, 0).Add(-time.Second)
-	
+
 	// 查询该月份的数据统计
-	query := `
+	query := fmt.Sprintf(`
 		SELECT 
 			count(*) as total_records,
 			min(open_time) as first_record,
 			max(open_time) as last_record
-		FROM klines_1m 
+		FROM %s 
 		WHERE symbol = ? 
 		AND open_time >= ? 
 		AND open_time <= ?
-	`
-	
+	`, r.baseTable)
+
 	var totalRecordsUint uint64
 	var firstRecord, lastRecord time.Time
-	
+
 	row := r.conn.QueryRow(ctx, query, symbol, startOfMonth, endOfMonth)
 	err := row.Scan(&totalRecordsUint, &firstRecord, &lastRecord)
 	if err != nil {
 		return 0, time.Time{}, time.Time{}, fmt.Errorf("failed to get monthly data stats: %w", err)
 	}
-	
+
 	return int64(totalRecordsUint), firstRecord, lastRecord, nil
 }
 
@@ -840,66 +1097,66 @@ func (r *Repository) CheckMonthlyDataExistence(ctx context.Context, symbol strin
 	if len(months) == 0 {
 		return make(map[string]bool), nil
 	}
-	
+
 	// 构建查询条件
 	var conditions []string
 	var args []interface{}
-	
+
 	args = append(args, symbol)
-	
+
 	for _, month := range months {
 		monthTime, err := time.Parse("2006-01", month)
 		if err != nil {
 			continue
 		}
-		
+
 		startOfMonth := monthTime
 		endOfMonth := startOfMonth.AddDate(0, 1, 0).Add(-time.Second)
-		
+
 		conditions = append(conditions, "(open_time >= ? AND open_time <= ?)")
 		args = append(args, startOfMonth, endOfMonth)
 	}
-	
+
 	if len(conditions) == 0 {
 		return make(map[string]bool), nil
 	}
-	
+
 	query := fmt.Sprintf(`
 		SELECT 
 			formatDateTime(toStartOfMonth(open_time), '%%Y-%%m') as month,
 			count(*) > 0 as has_data
-		FROM klines_1m 
+		FROM %s 
 		WHERE symbol = ? 
 		AND (%s)
 		GROUP BY toStartOfMonth(open_time)
 		ORDER BY month
-	`, strings.Join(conditions, " OR "))
-	
+	`, r.baseTable, strings.Join(conditions, " OR "))
+
 	rows, err := r.conn.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check monthly data existence: %w", err)
 	}
 	defer rows.Close()
-	
+
 	result := make(map[string]bool)
-	
+
 	// 初始化所有月份为false
 	for _, month := range months {
 		result[month] = false
 	}
-	
+
 	// 设置有数据的月份为true
 	for rows.Next() {
 		var month string
 		var hasData bool
-		
+
 		if err := rows.Scan(&month, &hasData); err != nil {
 			return nil, fmt.Errorf("failed to scan month existence: %w", err)
 		}
-		
+
 		result[month] = hasData
 	}
-	
+
 	return result, rows.Err()
 }
 
@@ -909,53 +1166,53 @@ func (r *Repository) GetDataCompletenessForSymbol(ctx context.Context, symbol st
 	if err != nil {
 		return nil, fmt.Errorf("invalid start month format: %w", err)
 	}
-	
+
 	endTime, err := time.Parse("2006-01", endMonth)
 	if err != nil {
 		return nil, fmt.Errorf("invalid end month format: %w", err)
 	}
-	
+
 	// 确保开始时间在结束时间之前
 	if startTime.After(endTime) {
 		return nil, fmt.Errorf("start month cannot be after end month")
 	}
-	
+
 	// 查询每月的数据统计
-	query := `
+	query := fmt.Sprintf(`
 		SELECT 
-			formatDateTime(toStartOfMonth(open_time), '%Y-%m') as month,
+			formatDateTime(toStartOfMonth(open_time), '%%Y-%%m') as month,
 			count(*) as actual_records,
 			min(open_time) as first_record,
 			max(open_time) as last_record
-		FROM klines_1m 
+		FROM %s 
 		WHERE symbol = ? 
 		AND open_time >= ? 
 		AND open_time < ?
 		GROUP BY toStartOfMonth(open_time)
 		ORDER BY month
-	`
-	
+	`, r.baseTable)
+
 	endTimeLimit := endTime.AddDate(0, 1, 0) // 添加一个月作为上限
-	
+
 	rows, err := r.conn.Query(ctx, query, symbol, startTime, endTimeLimit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query data completeness: %w", err)
 	}
 	defer rows.Close()
-	
+
 	monthlyStats := make(map[string]*domain.MonthlyStats)
 	var totalActualRecords int64
 	var firstRecord, lastRecord time.Time
-	
+
 	for rows.Next() {
 		var month string
 		var actualRecordsUint uint64
 		var monthFirstRecord, monthLastRecord time.Time
-		
+
 		if err := rows.Scan(&month, &actualRecordsUint, &monthFirstRecord, &monthLastRecord); err != nil {
 			return nil, fmt.Errorf("failed to scan completeness data: %w", err)
 		}
-		
+
 		// 计算该月的预期记录数
 		expectedRecords := r.calculateExpectedRecordsForMonth(month)
 		actualRecords := int64(actualRecordsUint)
@@ -963,19 +1220,19 @@ func (r *Repository) GetDataCompletenessForSymbol(ctx context.Context, symbol st
 		if expectedRecords > 0 {
 			completenessRatio = float64(actualRecords) / float64(expectedRecords) * 100
 		}
-		
+
 		monthlyStats[month] = &domain.MonthlyStats{
-			Month:           month,
-			ExpectedRecords: expectedRecords,
-			ActualRecords:   actualRecords,
+			Month:             month,
+			ExpectedRecords:   expectedRecords,
+			ActualRecords:     actualRecords,
 			CompletenessRatio: completenessRatio,
-			FirstRecord:     monthFirstRecord,
-			LastRecord:      monthLastRecord,
-			HasData:         actualRecords > 0,
+			FirstRecord:       monthFirstRecord,
+			LastRecord:        monthLastRecord,
+			HasData:           actualRecords > 0,
 		}
-		
+
 		totalActualRecords += actualRecords
-		
+
 		if firstRecord.IsZero() || monthFirstRecord.Before(firstRecord) {
 			firstRecord = monthFirstRecord
 		}
@@ -983,7 +1240,7 @@ func (r *Repository) GetDataCompletenessForSymbol(ctx context.Context, symbol st
 			lastRecord = monthLastRecord
 		}
 	}
-	
+
 	// 计算总的预期记录数
 	var totalExpectedRecords int64
 	currentMonth := startTime
@@ -991,27 +1248,27 @@ func (r *Repository) GetDataCompletenessForSymbol(ctx context.Context, symbol st
 		monthStr := currentMonth.Format("2006-01")
 		expectedRecords := r.calculateExpectedRecordsForMonth(monthStr)
 		totalExpectedRecords += expectedRecords
-		
+
 		// 如果没有数据，也要添加到统计中
 		if _, exists := monthlyStats[monthStr]; !exists {
 			monthlyStats[monthStr] = &domain.MonthlyStats{
-				Month:           monthStr,
-				ExpectedRecords: expectedRecords,
-				ActualRecords:   0,
+				Month:             monthStr,
+				ExpectedRecords:   expectedRecords,
+				ActualRecords:     0,
 				CompletenessRatio: 0.0,
-				HasData:         false,
+				HasData:           false,
 			}
 		}
-		
+
 		currentMonth = currentMonth.AddDate(0, 1, 0)
 	}
-	
+
 	// 计算整体完整性比率
 	completenessRatio := 0.0
 	if totalExpectedRecords > 0 {
 		completenessRatio = float64(totalActualRecords) / float64(totalExpectedRecords) * 100
 	}
-	
+
 	stats := &domain.DataCompletenessStats{
 		Symbol:               symbol,
 		TotalExpectedRecords: totalExpectedRecords,
@@ -1021,7 +1278,7 @@ func (r *Repository) GetDataCompletenessForSymbol(ctx context.Context, symbol st
 		FirstRecord:          firstRecord,
 		LastRecord:           lastRecord,
 	}
-	
+
 	return stats, rows.Err()
 }
 
@@ -1031,17 +1288,17 @@ func (r *Repository) calculateExpectedRecordsForMonth(month string) int64 {
 	if err != nil {
 		return 40320 // 默认值：28天 * 1440分钟
 	}
-	
+
 	// 计算该月的天数
 	year := monthTime.Year()
 	monthNum := monthTime.Month()
-	
+
 	// 获取下一个月的第一天，然后减去一天得到当前月的最后一天
 	nextMonth := time.Date(year, monthNum+1, 1, 0, 0, 0, 0, time.UTC)
 	lastDay := nextMonth.Add(-24 * time.Hour).Day()
-	
-	// 每天1440分钟 (24 * 60)
-	return int64(lastDay * 1440)
+
+	recordsPerDay := int64((24 * time.Hour) / r.baseIntervalDuration())
+	return int64(lastDay) * recordsPerDay
 }
 
 // GetAllSymbolInfos 获取所有交易对信息
@@ -1052,13 +1309,13 @@ func (r *Repository) GetAllSymbolInfos(ctx context.Context) ([]*domain.SymbolInf
 		FROM symbol_infos
 		ORDER BY symbol
 	`
-	
+
 	rows, err := r.conn.Query(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	var infos []*domain.SymbolInfo
 	for rows.Next() {
 		var info domain.SymbolInfo
@@ -1079,7 +1336,7 @@ func (r *Repository) GetAllSymbolInfos(ctx context.Context) ([]*domain.SymbolInf
 		}
 		infos = append(infos, &info)
 	}
-	
+
 	return infos, rows.Err()
 }
 
@@ -1091,7 +1348,7 @@ func (r *Repository) UpdateSymbolInfo(ctx context.Context, symbolInfo *domain.Sy
 		       latest_date = ?, total_months = ?, data_status = ?, updated_at = now()
 		WHERE symbol = ?
 	`
-	
+
 	// 提取基础资产和报价资产
 	baseAsset := symbolInfo.BaseAsset
 	quoteAsset := symbolInfo.QuoteAsset
@@ -1105,7 +1362,7 @@ func (r *Repository) UpdateSymbolInfo(ctx context.Context, symbolInfo *domain.Sy
 			quoteAsset = "UNKNOWN"
 		}
 	}
-	
+
 	return r.conn.Exec(ctx, query,
 		symbolInfo.Status,
 		baseAsset,
@@ -1130,14 +1387,14 @@ func (r *Repository) Query(ctx context.Context, query string, args ...interface{
 
 // DeleteDataInRange 删除指定时间范围内的数据
 func (r *Repository) DeleteDataInRange(ctx context.Context, symbol string, startTime, endTime time.Time) error {
-	query := `
-		ALTER TABLE klines_1m 
+	query := fmt.Sprintf(`
+		ALTER TABLE %s 
 		DELETE 
 		WHERE symbol = ? 
 		AND open_time >= ? 
 		AND open_time <= ?
-	`
-	
+	`, r.baseTable)
+
 	r.logger.Debug().
 		Str("symbol", symbol).
 		Time("start_time", startTime).

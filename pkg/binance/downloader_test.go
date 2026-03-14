@@ -81,6 +81,20 @@ func TestNewBinanceDownloader(t *testing.T) {
 	}
 }
 
+func TestNewBinanceDownloader_PreservesExplicitTimeout(t *testing.T) {
+	downloader := NewBinanceDownloader(
+		config.BinanceConfig{
+			BaseURL: "https://data.binance.vision",
+			Timeout: 120 * time.Second,
+		},
+		config.DownloaderConfig{},
+	)
+
+	if downloader.client.Timeout != 120*time.Second {
+		t.Fatalf("Expected configured timeout %s, got %s", 120*time.Second, downloader.client.Timeout)
+	}
+}
+
 func TestBinanceDownloader_BuildDownloadURL(t *testing.T) {
 	downloader := NewBinanceDownloader(
 		config.BinanceConfig{
@@ -471,6 +485,54 @@ func TestBinanceDownloader_GetAvailableDates(t *testing.T) {
 
 	if len(dates) == 0 {
 		t.Error("Expected some available dates")
+	}
+}
+
+func TestBinanceDownloader_GetAvailableDates_UsesS3ListingForHistoricalSymbol(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.RawQuery, "prefix=data%2Ffutures%2Fum%2Fmonthly%2Fklines%2FBTCUSDT%2F1m%2F") {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult>
+  <Contents><Key>data/futures/um/monthly/klines/BTCUSDT/1m/BTCUSDT-1m-2024-03.zip</Key></Contents>
+  <Contents><Key>data/futures/um/monthly/klines/BTCUSDT/1m/BTCUSDT-1m-2024-04.zip</Key></Contents>
+  <Contents><Key>data/futures/um/monthly/klines/BTCUSDT/1m/BTCUSDT-1m-2024-04.zip.CHECKSUM</Key></Contents>
+</ListBucketResult>`))
+			return
+		}
+
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	downloader := NewBinanceDownloader(
+		config.BinanceConfig{
+			BaseURL:    server.URL,
+			DataPath:   "/data/futures/um/daily/klines",
+			MarketType: "futures_um",
+			Interval:   "1m",
+		},
+		config.DownloaderConfig{
+			UserAgent: "TestAgent/1.0",
+		},
+	)
+	downloader.listingBaseURL = server.URL
+
+	ctx := testutils.WithTimeout(t, 5*time.Second)
+	dates, err := downloader.GetAvailableDates(ctx, "BTCUSDT")
+	testutils.AssertNoError(t, err)
+
+	if len(dates) != 2 {
+		t.Fatalf("Expected 2 dates from S3 listing, got %d", len(dates))
+	}
+
+	if dates[0].Format("2006-01") != "2024-03" || dates[1].Format("2006-01") != "2024-04" {
+		t.Fatalf("Unexpected dates returned: %v", dates)
 	}
 }
 

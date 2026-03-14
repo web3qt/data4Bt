@@ -9,23 +9,28 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rs/zerolog"
 	"binance-data-loader/internal/config"
 	"binance-data-loader/internal/domain"
 	"binance-data-loader/internal/logger"
+	"github.com/rs/zerolog"
 )
 
 // CSVParser CSV解析器
 type CSVParser struct {
-	config config.ParserConfig
-	logger zerolog.Logger
+	config   config.ParserConfig
+	logger   zerolog.Logger
+	interval string
+	step     time.Duration
 }
 
 // NewCSVParser 创建新的CSV解析器
 func NewCSVParser(cfg config.ParserConfig) *CSVParser {
+	interval, step := normalizeInterval(cfg.Interval)
 	return &CSVParser{
-		config: cfg,
-		logger: logger.GetLogger("csv_parser"),
+		config:   cfg,
+		logger:   logger.GetLogger("csv_parser"),
+		interval: interval,
+		step:     step,
 	}
 }
 
@@ -78,9 +83,9 @@ func (p *CSVParser) Parse(ctx context.Context, data []byte, symbol string) ([]do
 		kline, err := p.parseRecord(record, symbol, lineNumber)
 		if err != nil {
 			validationResult.InvalidRows++
-			validationResult.Errors = append(validationResult.Errors, 
+			validationResult.Errors = append(validationResult.Errors,
 				fmt.Sprintf("Line %d: %s", lineNumber, err.Error()))
-			
+
 			// 如果启用了数据验证且错误过多，则停止解析
 			if p.config.ValidateData && len(validationResult.Errors) > 100 {
 				validationResult.Valid = false
@@ -200,20 +205,20 @@ func (p *CSVParser) parseRecord(record []string, symbol string, lineNumber int) 
 	}
 
 	kline := &domain.KLine{
-		Symbol:                symbol,
-		OpenTime:              openTime,
-		CloseTime:             closeTime,
-		OpenPrice:             openPrice,
-		HighPrice:             highPrice,
-		LowPrice:              lowPrice,
-		ClosePrice:            closePrice,
-		Volume:                volume,
-		QuoteAssetVolume:      quoteAssetVolume,
-		NumberOfTrades:        numberOfTrades,
-		TakerBuyBaseVolume:    takerBuyBaseVolume,
-		TakerBuyQuoteVolume:   takerBuyQuoteVolume,
-		Interval:              "1m",
-		CreatedAt:             time.Now(),
+		Symbol:              symbol,
+		OpenTime:            openTime,
+		CloseTime:           closeTime,
+		OpenPrice:           openPrice,
+		HighPrice:           highPrice,
+		LowPrice:            lowPrice,
+		ClosePrice:          closePrice,
+		Volume:              volume,
+		QuoteAssetVolume:    quoteAssetVolume,
+		NumberOfTrades:      numberOfTrades,
+		TakerBuyBaseVolume:  takerBuyBaseVolume,
+		TakerBuyQuoteVolume: takerBuyQuoteVolume,
+		Interval:            p.interval,
+		CreatedAt:           time.Now(),
 	}
 
 	return kline, nil
@@ -366,10 +371,11 @@ func (p *CSVParser) validateKLine(kline *domain.KLine) error {
 		errors = append(errors, "close time must be after open time")
 	}
 
-	// 验证时间间隔（1分钟数据）
+	// 验证时间间隔
 	duration := kline.CloseTime.Sub(kline.OpenTime)
-	if duration < 59*time.Second || duration > 60*time.Second {
-		errors = append(errors, fmt.Sprintf("invalid time interval: %v (expected ~1 minute)", duration))
+	expectedCloseSpan := p.expectedCloseSpan()
+	if duration < expectedCloseSpan || duration > p.step {
+		errors = append(errors, fmt.Sprintf("invalid time interval: %v (expected %s span)", duration, p.interval))
 	}
 
 	// 验证交易对
@@ -401,17 +407,17 @@ func (p *CSVParser) validateDataCompleteness(klines []domain.KLine, result *doma
 		}
 
 		if gaps > 0 {
-			result.Warnings = append(result.Warnings, 
+			result.Warnings = append(result.Warnings,
 				fmt.Sprintf("Found %d time gaps in the data", gaps))
 		}
 	}
 
-	// 检查数据量（1分钟数据，一天应该有1440条记录）
+	// 检查数据量
 	if len(klines) > 0 {
 		firstTime := klines[0].OpenTime
 		lastTime := klines[len(klines)-1].OpenTime
 		duration := lastTime.Sub(firstTime)
-		expectedRecords := int(duration.Minutes()) + 1
+		expectedRecords := int(duration/p.step) + 1
 		actualRecords := len(klines)
 
 		if actualRecords < expectedRecords {
@@ -421,6 +427,35 @@ func (p *CSVParser) validateDataCompleteness(klines []domain.KLine, result *doma
 	}
 
 	return nil
+}
+
+func (p *CSVParser) expectedCloseSpan() time.Duration {
+	if p.step <= time.Millisecond {
+		return 0
+	}
+	return p.step - time.Millisecond
+}
+
+func normalizeInterval(raw string) (string, time.Duration) {
+	interval := strings.ToLower(strings.TrimSpace(raw))
+	switch interval {
+	case "1s":
+		return "1s", time.Second
+	case "5m":
+		return "5m", 5 * time.Minute
+	case "15m":
+		return "15m", 15 * time.Minute
+	case "1h":
+		return "1h", time.Hour
+	case "4h":
+		return "4h", 4 * time.Hour
+	case "1d":
+		return "1d", 24 * time.Hour
+	case "", "1m":
+		return "1m", time.Minute
+	default:
+		return "1m", time.Minute
+	}
 }
 
 // ParseFromString 从字符串解析CSV数据
@@ -437,17 +472,17 @@ func (p *CSVParser) ParseFromBuffer(ctx context.Context, buffer []byte, symbol s
 func (p *CSVParser) ValidateCSV(data []byte) error {
 	reader := strings.NewReader(string(data))
 	csvReader := csv.NewReader(reader)
-	
+
 	// 读取第一行检查格式
 	record, err := csvReader.Read()
 	if err != nil {
 		return fmt.Errorf("failed to read CSV header: %w", err)
 	}
-	
+
 	// 检查列数
 	if len(record) < 12 {
 		return fmt.Errorf("invalid CSV format: expected at least 12 columns, got %d", len(record))
 	}
-	
+
 	return nil
 }

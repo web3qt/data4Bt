@@ -27,12 +27,12 @@ type Importer struct {
 	buffer           []domain.KLine
 	bufferMutex      sync.Mutex
 	lastFlush        time.Time
-	
+
 	// 并发控制
-	maxWorkers       int
+	maxWorkers int
 	// 并发worker状态管理
-	workerStates     map[int]*domain.WorkerState
-	workerStatesMux  sync.RWMutex
+	workerStates    map[int]*domain.WorkerState
+	workerStatesMux sync.RWMutex
 }
 
 // NewImporter 创建新的数据导入器
@@ -46,7 +46,7 @@ func NewImporter(
 ) *Importer {
 	// 设置默认最大worker数为5
 	maxWorkers := 5
-	
+
 	return &Importer{
 		config:           cfg,
 		downloader:       downloader,
@@ -60,7 +60,7 @@ func NewImporter(
 		lastFlush:        time.Now(),
 		maxWorkers:       maxWorkers,
 		// 初始化worker状态管理
-		workerStates:     make(map[int]*domain.WorkerState),
+		workerStates: make(map[int]*domain.WorkerState),
 	}
 }
 
@@ -109,7 +109,7 @@ func (i *Importer) ImportData(ctx context.Context, tasks []domain.DownloadTask) 
 				// 可恢复错误不计入成功数，但也不停止整个流程
 				continue
 			}
-			
+
 			// 真正的错误，停止导入
 			i.logger.Error().
 				Err(err).
@@ -203,13 +203,22 @@ func (i *Importer) processTask(ctx context.Context, task domain.DownloadTask) er
 	}
 
 	// 检查是否已经处理过这个日期
-		if !state.LastDate.IsZero() && !task.Date.After(state.LastDate) {
+	taskDateKey := completedTaskDateKey(task.Date)
+	if task.Interval == "1s" {
+		if containsCompletedTaskDate(state.CompletedTaskDates, taskDateKey) {
 			i.logger.Debug().
 				Str("symbol", task.Symbol).
 				Str("date", task.Date.Format("2006-01-02")).
 				Msg("Date already processed, skipping")
 			return nil
 		}
+	} else if !state.LastDate.IsZero() && !task.Date.After(state.LastDate) {
+		i.logger.Debug().
+			Str("symbol", task.Symbol).
+			Str("date", task.Date.Format("2006-01-02")).
+			Msg("Date already processed, skipping")
+		return nil
+	}
 
 	// 再次检查上下文在下载前
 	select {
@@ -259,10 +268,22 @@ func (i *Importer) processTask(ctx context.Context, task domain.DownloadTask) er
 	if err := i.addToBuffer(ctx, klines); err != nil {
 		return fmt.Errorf("failed to add to buffer: %w", err)
 	}
+	if task.Interval == "1s" {
+		if err := i.flushBuffer(ctx); err != nil {
+			return fmt.Errorf("failed to flush 1s task buffer: %w", err)
+		}
+	}
 
 	// 更新状态
 	state.LastDate = task.Date
-	state.Processed++
+	if task.Interval == "1s" {
+		if !containsCompletedTaskDate(state.CompletedTaskDates, taskDateKey) {
+			state.CompletedTaskDates = appendCompletedTaskDate(state.CompletedTaskDates, taskDateKey)
+			state.Processed++
+		}
+	} else {
+		state.Processed++
+	}
 	state.LastUpdated = time.Now()
 
 	if err := i.stateManager.SaveState(state); err != nil {
@@ -292,6 +313,26 @@ func (i *Importer) processTask(ctx context.Context, task domain.DownloadTask) er
 		Msg("Task processed successfully")
 
 	return nil
+}
+
+func completedTaskDateKey(date time.Time) string {
+	return date.UTC().Format("2006-01-02")
+}
+
+func containsCompletedTaskDate(completedDates []string, dateKey string) bool {
+	for _, completedDate := range completedDates {
+		if completedDate == dateKey {
+			return true
+		}
+	}
+	return false
+}
+
+func appendCompletedTaskDate(completedDates []string, dateKey string) []string {
+	if containsCompletedTaskDate(completedDates, dateKey) {
+		return completedDates
+	}
+	return append(completedDates, dateKey)
 }
 
 // addToBuffer 添加数据到缓冲区
@@ -341,10 +382,13 @@ func (i *Importer) flushBufferUnsafe(ctx context.Context) error {
 
 	start := time.Now()
 	batchSize := len(i.buffer)
+	groupedKlines := groupKLinesBySymbol(i.buffer)
 
-	// 保存到数据库
-	if err := i.repository.Save(ctx, i.buffer); err != nil {
-		return fmt.Errorf("failed to save batch: %w", err)
+	// 按 symbol 分批保存，避免仓库层把混合 symbol 批次当成单一 symbol 去重。
+	for _, groupedBatch := range groupedKlines {
+		if err := i.repository.Save(ctx, groupedBatch); err != nil {
+			return fmt.Errorf("failed to save batch for %s: %w", groupedBatch[0].Symbol, err)
+		}
 	}
 
 	// 清空缓冲区
@@ -361,6 +405,27 @@ func (i *Importer) flushBufferUnsafe(ctx context.Context) error {
 		Msg("Buffer flushed successfully")
 
 	return nil
+}
+
+func groupKLinesBySymbol(klines []domain.KLine) [][]domain.KLine {
+	if len(klines) == 0 {
+		return nil
+	}
+
+	order := make([]string, 0, len(klines))
+	grouped := make(map[string][]domain.KLine)
+	for _, kline := range klines {
+		if _, exists := grouped[kline.Symbol]; !exists {
+			order = append(order, kline.Symbol)
+		}
+		grouped[kline.Symbol] = append(grouped[kline.Symbol], kline)
+	}
+
+	result := make([][]domain.KLine, 0, len(order))
+	for _, symbol := range order {
+		result = append(result, grouped[symbol])
+	}
+	return result
 }
 
 // deduplicateKLines 去重K线数据
@@ -398,9 +463,9 @@ func (i *Importer) GetBufferStatus() map[string]interface{} {
 	defer i.bufferMutex.Unlock()
 
 	return map[string]interface{}{
-		"buffer_size":     len(i.buffer),
-		"buffer_capacity": cap(i.buffer),
-		"last_flush":      i.lastFlush,
+		"buffer_size":      len(i.buffer),
+		"buffer_capacity":  cap(i.buffer),
+		"last_flush":       i.lastFlush,
 		"time_since_flush": time.Since(i.lastFlush),
 	}
 }
@@ -645,7 +710,7 @@ func (i *Importer) processConcurrentTask(ctx context.Context, workerID int, conc
 				// 对于可恢复错误，不增加失败计数，继续处理下一个任务
 				continue
 			}
-			
+
 			i.logger.Error().
 				Err(err).
 				Int("worker_id", workerID).

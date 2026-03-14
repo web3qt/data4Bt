@@ -35,6 +35,7 @@ type BinanceConfig struct {
 	DataPath        string        `mapstructure:"data_path"`
 	MarketType      string        `mapstructure:"market_type"`
 	ExchangeInfoURL string        `mapstructure:"exchange_info_url"`
+	ExplicitSymbols []string      `mapstructure:"explicit_symbols"`
 	SymbolsFilter   string        `mapstructure:"symbols_filter"`
 	Interval        string        `mapstructure:"interval"`
 	Timeout         time.Duration `mapstructure:"timeout"`
@@ -54,10 +55,11 @@ type DownloaderConfig struct {
 
 // ParserConfig 解析器配置
 type ParserConfig struct {
-	Concurrency     int  `mapstructure:"concurrency"`
-	BufferSize      int  `mapstructure:"buffer_size"`
-	ValidateData    bool `mapstructure:"validate_data"`
-	SkipInvalidRows bool `mapstructure:"skip_invalid_rows"`
+	Concurrency     int    `mapstructure:"concurrency"`
+	BufferSize      int    `mapstructure:"buffer_size"`
+	ValidateData    bool   `mapstructure:"validate_data"`
+	SkipInvalidRows bool   `mapstructure:"skip_invalid_rows"`
+	Interval        string `mapstructure:"interval"`
 }
 
 // DatabaseConfig 数据库配置
@@ -69,6 +71,7 @@ type DatabaseConfig struct {
 type ClickHouseConfig struct {
 	Hosts           []string       `mapstructure:"hosts"`
 	Database        string         `mapstructure:"database"`
+	BaseTable       string         `mapstructure:"base_table"`
 	Username        string         `mapstructure:"username"`
 	Password        string         `mapstructure:"password"`
 	Settings        map[string]int `mapstructure:"settings"`
@@ -124,6 +127,7 @@ type WebDashboardConfig struct {
 
 // SchedulerConfig 调度器配置
 type SchedulerConfig struct {
+	StartDate             string        `mapstructure:"start_date"`
 	EndDate               string        `mapstructure:"end_date"`
 	BatchDays             int           `mapstructure:"batch_days"`
 	MaxConcurrentSymbols  int           `mapstructure:"max_concurrent_symbols"`
@@ -211,10 +215,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("parser.buffer_size", 50)
 	v.SetDefault("parser.validate_data", true)
 	v.SetDefault("parser.skip_invalid_rows", true)
+	v.SetDefault("parser.interval", "1m")
 
 	// 数据库默认配置
 	v.SetDefault("database.clickhouse.hosts", []string{"localhost:9000"})
 	v.SetDefault("database.clickhouse.database", "data4BT")
+	v.SetDefault("database.clickhouse.base_table", "klines_1m")
 	v.SetDefault("database.clickhouse.username", "default")
 	v.SetDefault("database.clickhouse.password", "123456")
 	v.SetDefault("database.clickhouse.compression", "lz4")
@@ -254,6 +260,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("monitoring.web_dashboard.show_realtime_progress", true)
 
 	// 调度器默认配置
+	v.SetDefault("scheduler.start_date", "")
 	v.SetDefault("scheduler.end_date", "")
 	v.SetDefault("scheduler.batch_days", 7)
 	v.SetDefault("scheduler.max_concurrent_symbols", 5)

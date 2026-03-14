@@ -194,6 +194,64 @@ func TestScheduler_generateTasksForSymbolWithEndDate(t *testing.T) {
 	}
 }
 
+func TestScheduler_generateTasksForSymbolWithEndDate_UsesCachedTimelineMonths(t *testing.T) {
+	symbol := "ANTUSDT"
+	endDate := time.Date(2025, 2, 28, 0, 0, 0, 0, time.UTC)
+
+	mockDownloader := &mocks.MockDownloader{
+		GetAvailableDatesFunc: func(ctx context.Context, symbol string) ([]time.Time, error) {
+			return nil, errors.New("downloader should not be called when cached timeline months exist")
+		},
+	}
+
+	mockStateManager := &mocks.MockStateManager{
+		GetStateFunc: func(symbol string) (*domain.ProcessingState, error) {
+			return &domain.ProcessingState{
+				Symbol:   symbol,
+				LastDate: time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC),
+				Status:   "pending",
+			}, nil
+		},
+		GetTimelineFunc: func(symbol string) (*domain.SymbolTimeline, error) {
+			return &domain.SymbolTimeline{
+				Symbol: symbol,
+				AvailableMonths: []string{
+					"2024-03",
+					"2024-04",
+					"2024-05",
+				},
+				HistoricalStartDate: time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC),
+				LatestAvailableDate: time.Date(2024, 5, 1, 0, 0, 0, 0, time.UTC),
+				TotalMonths:         3,
+			}, nil
+		},
+	}
+
+	scheduler := &Scheduler{
+		downloader:   mockDownloader,
+		stateManager: mockStateManager,
+	}
+
+	ctx := testutils.WithTimeout(t, 5*time.Second)
+	tasks, err := scheduler.generateTasksForSymbolWithEndDate(ctx, symbol, endDate)
+
+	testutils.AssertNoError(t, err)
+
+	if len(tasks) != 3 {
+		t.Fatalf("Expected 3 tasks from cached timeline months, got %d", len(tasks))
+	}
+
+	for i, expectedMonth := range []time.Time{
+		time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2024, 4, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2024, 5, 1, 0, 0, 0, 0, time.UTC),
+	} {
+		if !tasks[i].Date.Equal(expectedMonth) {
+			t.Fatalf("Task %d expected month %s, got %s", i, expectedMonth.Format("2006-01"), tasks[i].Date.Format("2006-01"))
+		}
+	}
+}
+
 func TestScheduler_processTasks(t *testing.T) {
 	tasks := []domain.DownloadTask{
 		{Symbol: "BTCUSDT", Date: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)},

@@ -18,11 +18,11 @@ func CreateTempDir(t *testing.T, prefix string) string {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	
+
 	t.Cleanup(func() {
 		os.RemoveAll(dir)
 	})
-	
+
 	return dir
 }
 
@@ -32,11 +32,11 @@ func CreateTempDirB(b *testing.B, prefix string) string {
 	if err != nil {
 		b.Fatalf("Failed to create temp dir: %v", err)
 	}
-	
+
 	b.Cleanup(func() {
 		os.RemoveAll(dir)
 	})
-	
+
 	return dir
 }
 
@@ -50,14 +50,14 @@ func CreateTestConfig(tempDir string) *config.Config {
 			FilePath: "",
 		},
 		Binance: config.BinanceConfig{
-			BaseURL:        "https://data.binance.vision",
-			DataPath:       "/data/spot/daily/klines",
-			SymbolsFilter:  "USDT",
-			Interval:       "1m",
-			Timeout:        30 * time.Second,
-			RetryCount:     3,
-			RetryDelay:     5 * time.Second,
-			ProxyURL:       "",
+			BaseURL:       "https://data.binance.vision",
+			DataPath:      "/data/spot/daily/klines",
+			SymbolsFilter: "USDT",
+			Interval:      "1m",
+			Timeout:       30 * time.Second,
+			RetryCount:    3,
+			RetryDelay:    5 * time.Second,
+			ProxyURL:      "",
 		},
 		Downloader: config.DownloaderConfig{
 			Concurrency:       10,
@@ -67,15 +67,17 @@ func CreateTestConfig(tempDir string) *config.Config {
 			MaxFileSize:       "100MB",
 		},
 		Parser: config.ParserConfig{
-			Concurrency:      5,
-			BufferSize:       50,
-			ValidateData:     true,
-			SkipInvalidRows:  true,
+			Concurrency:     5,
+			BufferSize:      50,
+			ValidateData:    true,
+			SkipInvalidRows: true,
+			Interval:        "1m",
 		},
 		Database: config.DatabaseConfig{
 			ClickHouse: config.ClickHouseConfig{
 				Hosts:           []string{"localhost:9000"},
 				Database:        "data4BT_test",
+				BaseTable:       "klines_1m",
 				Username:        "default",
 				Password:        "",
 				Compression:     "lz4",
@@ -104,15 +106,15 @@ func CreateTestConfig(tempDir string) *config.Config {
 			ParallelRefresh: true,
 		},
 		Monitoring: config.MonitoringConfig{
-			Enabled:                  true,
-			MetricsPort:              8080,
-			HealthCheckPort:          8081,
-			ProgressReportInterval:   30 * time.Second,
+			Enabled:                true,
+			MetricsPort:            8080,
+			HealthCheckPort:        8081,
+			ProgressReportInterval: 30 * time.Second,
 		},
 		Scheduler: config.SchedulerConfig{
-			EndDate:               "",
-			BatchDays:             7,
-			MaxConcurrentSymbols:  5,
+			EndDate:              "",
+			BatchDays:            7,
+			MaxConcurrentSymbols: 5,
 		},
 	}
 }
@@ -120,20 +122,20 @@ func CreateTestConfig(tempDir string) *config.Config {
 // CreateTestKLine 创建测试K线数据
 func CreateTestKLine(symbol string, openTime time.Time) domain.KLine {
 	return domain.KLine{
-		Symbol:               symbol,
-		OpenTime:             openTime,
-		CloseTime:            openTime.Add(59*time.Second + 999*time.Millisecond),
-		OpenPrice:            50000.00,
-		HighPrice:            50100.00,
-		LowPrice:             49900.00,
-		ClosePrice:           50050.00,
-		Volume:               1.23456,
-		QuoteAssetVolume:     61782.345,
-		NumberOfTrades:       100,
-		TakerBuyBaseVolume:   0.65432,
-		TakerBuyQuoteVolume:  32765.123,
-		Interval:             "1m",
-		CreatedAt:            time.Now(),
+		Symbol:              symbol,
+		OpenTime:            openTime,
+		CloseTime:           openTime.Add(59*time.Second + 999*time.Millisecond),
+		OpenPrice:           50000.00,
+		HighPrice:           50100.00,
+		LowPrice:            49900.00,
+		ClosePrice:          50050.00,
+		Volume:              1.23456,
+		QuoteAssetVolume:    61782.345,
+		NumberOfTrades:      100,
+		TakerBuyBaseVolume:  0.65432,
+		TakerBuyQuoteVolume: 32765.123,
+		Interval:            "1m",
+		CreatedAt:           time.Now(),
 	}
 }
 
@@ -168,15 +170,15 @@ func CreateTestProcessingState(symbol string) *domain.ProcessingState {
 // CreateTestSymbolTimeline 创建测试代币时间线
 func CreateTestSymbolTimeline(symbol string) *domain.SymbolTimeline {
 	return &domain.SymbolTimeline{
-		Symbol:               symbol,
-		AvailableMonths:      []string{"2024-01", "2024-02", "2024-03"},
-		ImportedMonths:       []string{"2024-01", "2024-02"},
-		TotalMonths:          3,
-		ImportedMonthsCount:  2,
-		HistoricalStartDate:  time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
-		LatestAvailableDate:  time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC),
-		Status:               "processing",
-		LastUpdated:          time.Now(),
+		Symbol:              symbol,
+		AvailableMonths:     []string{"2024-01", "2024-02", "2024-03"},
+		ImportedMonths:      []string{"2024-01", "2024-02"},
+		TotalMonths:         3,
+		ImportedMonthsCount: 2,
+		HistoricalStartDate: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+		LatestAvailableDate: time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC),
+		Status:              "processing",
+		LastUpdated:         time.Now(),
 	}
 }
 
@@ -215,7 +217,7 @@ func CreateTestSymbolProgress(symbol string) *domain.SymbolProgressInfo {
 func AssertTimeEqual(t *testing.T, expected, actual time.Time, msgAndArgs ...interface{}) {
 	expectedTrunc := expected.Truncate(time.Second)
 	actualTrunc := actual.Truncate(time.Second)
-	
+
 	if !expectedTrunc.Equal(actualTrunc) {
 		t.Errorf("Expected time %v, got %v", expected, actual)
 		if len(msgAndArgs) > 0 {

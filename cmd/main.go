@@ -27,6 +27,7 @@ import (
 	"binance-data-loader/pkg/scheduler"
 	"binance-data-loader/pkg/verification"
 	"binance-data-loader/pkg/webmonitor"
+	"binance-data-loader/pkg/windowimport"
 )
 
 /*
@@ -41,20 +42,20 @@ import (
 */
 
 var (
-    configFile = flag.String("config", "config.yml", "Configuration file path")
-    command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, populate-views, status, discover, update-latest, range-query, list-symbols, update-ranges, check-quality, export-csv, backfill-gaps")
-    symbols    = flag.String("symbols", "", "Comma-separated list of symbols to process (optional)")
-    endDate    = flag.String("end", "", "End date (YYYY-MM-DD)")
-    output     = flag.String("output", "", "Output file path for range-query results (optional)")
-    verbose    = flag.Bool("verbose", false, "Enable verbose logging")
-    version    = flag.Bool("version", false, "Show version information")
-    detailed   = flag.Bool("detailed", false, "Show detailed status information")
-    startDate  = flag.String("start", "", "Start date for quality check (YYYY-MM-DD)")
-    format     = flag.String("format", "console", "Output format for quality check: console, json, csv, markdown")
-    interval   = flag.String("interval", "1m", "Time interval for CSV export: 1m, 5m, 15m, 1h, 4h, 1d")
-    stream     = flag.Bool("stream", false, "Stream per-symbol verification output as each completes")
-    dryRun     = flag.Bool("dry-run", false, "Preview gaps without downloading data")
-    force      = flag.Bool("force", false, "Force redownload of existing data")
+	configFile = flag.String("config", "config.yml", "Configuration file path")
+	command    = flag.String("cmd", "run", "Command to execute: run, validate, init-db, create-views, populate-views, status, discover, update-latest, range-query, list-symbols, update-ranges, check-quality, export-csv, backfill-gaps, futures-um-1s-15d, futures-um-1s-top30-90d, futures-um-1s-top30-30d, futures-um-1s-repair-gaps")
+	symbols    = flag.String("symbols", "", "Comma-separated list of symbols to process (optional)")
+	endDate    = flag.String("end", "", "End date (YYYY-MM-DD)")
+	output     = flag.String("output", "", "Output file path for range-query results (optional)")
+	verbose    = flag.Bool("verbose", false, "Enable verbose logging")
+	version    = flag.Bool("version", false, "Show version information")
+	detailed   = flag.Bool("detailed", false, "Show detailed status information")
+	startDate  = flag.String("start", "", "Start date for quality check (YYYY-MM-DD)")
+	format     = flag.String("format", "console", "Output format for quality check: console, json, csv, markdown")
+	interval   = flag.String("interval", "1m", "Time interval for CSV export: 1m, 5m, 15m, 1h, 4h, 1d")
+	stream     = flag.Bool("stream", false, "Stream per-symbol verification output as each completes")
+	dryRun     = flag.Bool("dry-run", false, "Preview gaps without downloading data")
+	force      = flag.Bool("force", false, "Force redownload of existing data")
 )
 
 const (
@@ -98,7 +99,7 @@ func main() {
 
 	// 创建信号处理器
 	signalHandler := signal.NewSignalHandler(10*time.Second, log)
-	
+
 	// 启动信号处理
 	if err := signalHandler.Start(context.Background()); err != nil {
 		log.Error().Err(err).Msg("Failed to start signal handler")
@@ -164,9 +165,55 @@ func executeCommand(ctx context.Context, cfg *config.Config, cmd string) error {
 		return exportCSV(ctx, cfg)
 	case "backfill-gaps":
 		return backfillGaps(ctx, cfg)
+	case "futures-um-1s-15d":
+		return runFuturesUM1sLatest15d(ctx, cfg)
+	case "futures-um-1s-top30-90d":
+		return runFuturesUM1sTop30Recent90d(ctx, cfg)
+	case "futures-um-1s-top30-30d":
+		return runFuturesUM1sTop30Recent90d(ctx, cfg)
+	case "futures-um-1s-repair-gaps":
+		return runFuturesUM1sRepairGaps(ctx, cfg)
 	default:
 		return fmt.Errorf("unknown command: %s", cmd)
 	}
+}
+
+func runFuturesUM1sLatest15d(ctx context.Context, cfg *config.Config) error {
+	return windowimport.RunFuturesUM1sLatest15d(ctx, cfg)
+}
+
+func runFuturesUM1sTop30Recent90d(ctx context.Context, cfg *config.Config) error {
+	return windowimport.RunFuturesUM1sTop30Recent90d(ctx, cfg)
+}
+
+func runFuturesUM1sRepairGaps(ctx context.Context, cfg *config.Config) error {
+	effectiveCfg := *cfg
+	effectiveCfg.Binance = cfg.Binance
+	effectiveCfg.Scheduler = cfg.Scheduler
+	effectiveCfg.Database = cfg.Database
+	effectiveCfg.Downloader = cfg.Downloader
+
+	if *symbols != "" {
+		effectiveCfg.Binance.ExplicitSymbols = parseSymbolsParameter(*symbols)
+	}
+
+	if *startDate != "" {
+		parsed, err := parseFlexibleDate(*startDate, true)
+		if err != nil {
+			return fmt.Errorf("invalid start date format (expected YYYY-MM-DD or YYYY-MM): %w", err)
+		}
+		effectiveCfg.Scheduler.StartDate = parsed.UTC().Format("2006-01-02")
+	}
+
+	if *endDate != "" {
+		parsed, err := parseFlexibleDate(*endDate, false)
+		if err != nil {
+			return fmt.Errorf("invalid end date format (expected YYYY-MM-DD or YYYY-MM): %w", err)
+		}
+		effectiveCfg.Scheduler.EndDate = parsed.UTC().Format("2006-01-02")
+	}
+
+	return windowimport.RunFuturesUM1sRepairGaps(ctx, &effectiveCfg, *dryRun)
 }
 
 func runDataLoader(ctx context.Context, cfg *config.Config) error {
@@ -236,7 +283,6 @@ func runDataLoader(ctx context.Context, cfg *config.Config) error {
 	log.Info().Msg("Concurrent data loader completed successfully")
 	return nil
 }
-
 
 func updateToLatest(ctx context.Context, cfg *config.Config) error {
 	log := logger.GetLogger("update_to_latest")
@@ -417,7 +463,7 @@ type components struct {
 func (c *components) cleanup() {
 	log := logger.GetLogger("cleanup")
 	log.Info().Msg("Starting component cleanup")
-	
+
 	// 停止Web监控器（优先级最高，需要最长时间）
 	if c.webMonitor != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -426,21 +472,21 @@ func (c *components) cleanup() {
 			log.Warn().Err(err).Msg("Failed to stop web monitor gracefully")
 		}
 	}
-	
+
 	// 关闭导入器
 	if c.importer != nil {
 		if err := c.importer.Close(); err != nil {
 			log.Warn().Err(err).Msg("Failed to close importer")
 		}
 	}
-	
+
 	// 关闭数据库连接（最后关闭）
 	if c.repository != nil {
 		if err := c.repository.Close(); err != nil {
 			log.Warn().Err(err).Msg("Failed to close repository")
 		}
 	}
-	
+
 	log.Info().Msg("Component cleanup completed")
 }
 
@@ -535,12 +581,12 @@ func parseDateRange(cfg *config.Config) (time.Time, error) {
 
 func getSymbolList(ctx context.Context, downloader *binance.BinanceDownloader, stateManager *state.FileStateManager, cfg *config.Config) ([]string, []domain.SymbolTimeline, error) {
 	log := logger.GetLogger("symbol_list")
-	
+
 	if *symbols != "" {
 		// 使用命令行指定的交易对
 		symbolList := strings.Split(*symbols, ",")
 		var timelines []domain.SymbolTimeline
-		
+
 		// 为指定的交易对获取或创建时间线
 		for _, symbol := range symbolList {
 			symbol = strings.TrimSpace(strings.ToUpper(symbol))
@@ -551,7 +597,7 @@ func getSymbolList(ctx context.Context, downloader *binance.BinanceDownloader, s
 			}
 			timelines = append(timelines, *timeline)
 		}
-		
+
 		return symbolList, timelines, nil
 	}
 
@@ -562,7 +608,7 @@ func getSymbolList(ctx context.Context, downloader *binance.BinanceDownloader, s
 			// 检查缓存是否仍然有效
 			cacheValid := true
 			var timelineList []domain.SymbolTimeline
-			
+
 			for _, timeline := range existingTimelines {
 				if time.Since(timeline.LastUpdated) > cfg.Scheduler.TimelineCacheDuration {
 					cacheValid = false
@@ -570,7 +616,7 @@ func getSymbolList(ctx context.Context, downloader *binance.BinanceDownloader, s
 				}
 				timelineList = append(timelineList, *timeline)
 			}
-			
+
 			if cacheValid {
 				symbols := make([]string, 0, len(existingTimelines))
 				for symbol := range existingTimelines {
@@ -580,7 +626,7 @@ func getSymbolList(ctx context.Context, downloader *binance.BinanceDownloader, s
 					Int("cached_symbols", len(symbols)).
 					Dur("cache_age", time.Since(timelineList[0].LastUpdated)).
 					Msg("Using cached symbol list and timelines")
-				
+
 				return symbols, timelineList, nil
 			}
 		}
@@ -646,7 +692,7 @@ func showStartupOverview(symbols []string, timelines []domain.SymbolTimeline) {
 	fmt.Printf("\n")
 	fmt.Printf("🚀 === Binance 数据加载器启动概览 ===\n")
 	fmt.Printf("\n")
-	
+
 	if len(timelines) == 0 {
 		fmt.Printf("📋 将处理的交易对: %d 个\n", len(symbols))
 		for i, symbol := range symbols {
@@ -671,7 +717,7 @@ func showStartupOverview(symbols []string, timelines []domain.SymbolTimeline) {
 	completedMonths := 0
 	earliestDate := time.Now()
 	latestDate := time.Time{}
-	
+
 	for _, timeline := range timelines {
 		totalMonths += timeline.TotalMonths
 		completedMonths += timeline.ImportedMonthsCount
@@ -696,7 +742,7 @@ func showStartupOverview(symbols []string, timelines []domain.SymbolTimeline) {
 		timeline := timelines[i]
 		progress := float64(timeline.ImportedMonthsCount) * 100 / float64(timeline.TotalMonths)
 		progressBar := generateProgressBar(progress, 20)
-		
+
 		fmt.Printf("   %-12s %s %3.0f%% (%2d/%2d月) %s-%s\n",
 			timeline.Symbol,
 			progressBar,
@@ -706,11 +752,11 @@ func showStartupOverview(symbols []string, timelines []domain.SymbolTimeline) {
 			timeline.HistoricalStartDate.Format("2006-01"),
 			timeline.LatestAvailableDate.Format("2006-01"))
 	}
-	
+
 	if len(timelines) > 10 {
 		fmt.Printf("   ... 还有 %d 个交易对\n", len(timelines)-10)
 	}
-	
+
 	fmt.Printf("\n")
 	fmt.Printf("💡 提示: 使用 'go run cmd/main.go -cmd=status -detailed' 查看详细状态\n")
 	fmt.Printf("\n")
@@ -983,7 +1029,7 @@ func discoverSymbols(ctx context.Context, cfg *config.Config) error {
 		if err := comps.stateManager.SaveTimeline(timeline); err != nil {
 			fmt.Printf(" ⚠️  状态保存失败: %v\n", err)
 		}
-		
+
 		// 保存交易对信息到数据库
 		symbolInfo := &domain.SymbolInfo{
 			Symbol:       timeline.Symbol,
@@ -995,11 +1041,11 @@ func discoverSymbols(ctx context.Context, cfg *config.Config) error {
 			CreatedAt:    time.Now(),
 			UpdatedAt:    time.Now(),
 		}
-		
+
 		if err := comps.repository.SaveSymbolInfo(ctx, symbolInfo); err != nil {
 			fmt.Printf(" ⚠️  数据库保存失败: %v", err)
 		}
-		
+
 		fmt.Printf(" ✅ 完成 (%d个月)\n", timeline.TotalMonths)
 		timelines = append(timelines, timeline)
 	}
@@ -1293,32 +1339,32 @@ func init() {
 func listSymbols(ctx context.Context, cfg *config.Config) error {
 	log := logger.GetLogger("list_symbols")
 	log.Info().Msg("Listing symbols from database")
-	
+
 	// 初始化组件
 	comps, err := initializeComponents(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to initialize components: %w", err)
 	}
 	defer comps.cleanup()
-	
+
 	// 获取所有交易对信息
 	symbolInfos, err := comps.repository.GetAllSymbolInfos(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get symbol infos: %w", err)
 	}
-	
+
 	if len(symbolInfos) == 0 {
 		fmt.Println("🔍 数据库中没有找到交易对信息")
 		fmt.Println("💡 提示: 请先使用 'go run cmd/main.go -cmd=discover' 发现交易对")
 		return nil
 	}
-	
+
 	fmt.Println("📊 数据库中的交易对信息:")
 	fmt.Println("================================================================================")
-	fmt.Printf("%-12s %-8s %-6s %-6s %-12s %-12s %-6s %-10s\n", 
+	fmt.Printf("%-12s %-8s %-6s %-6s %-12s %-12s %-6s %-10s\n",
 		"交易对", "状态", "基础", "报价", "最早日期", "最新日期", "月数", "数据状态")
 	fmt.Println("--------------------------------------------------------------------------------")
-	
+
 	for _, info := range symbolInfos {
 		fmt.Printf("%-12s %-8s %-6s %-6s %-12s %-12s %-6d %-10s\n",
 			info.Symbol,
@@ -1331,10 +1377,10 @@ func listSymbols(ctx context.Context, cfg *config.Config) error {
 			info.DataStatus,
 		)
 	}
-	
+
 	fmt.Println("================================================================================")
 	fmt.Printf("🎉 总计: %d 个交易对\n", len(symbolInfos))
-	
+
 	return nil
 }
 
@@ -1342,32 +1388,32 @@ func listSymbols(ctx context.Context, cfg *config.Config) error {
 func updateTimelineRanges(ctx context.Context, cfg *config.Config) error {
 	fmt.Println("📅 更新交易对时间范围信息...")
 	fmt.Println()
-	
+
 	log := logger.GetLogger("update_ranges")
 	log.Info().Msg("Starting timeline ranges update")
-	
+
 	// 初始化组件
 	comps, err := initializeComponents(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to initialize components: %w", err)
 	}
 	defer comps.cleanup()
-	
+
 	// 获取数据库中所有已存储的交易对
 	fmt.Println("🔍 获取数据库中的所有交易对信息...")
 	symbolInfos, err := comps.repository.GetAllSymbolInfos(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get symbol infos: %w", err)
 	}
-	
+
 	if len(symbolInfos) == 0 {
 		fmt.Println("⚠️  数据库中没有找到交易对信息")
 		fmt.Println("💡 提示: 请先使用 'go run cmd/main.go -cmd=discover' 发现交易对")
 		return nil
 	}
-	
+
 	fmt.Printf("✅ 发现 %d 个交易对需要更新时间范围\n\n", len(symbolInfos))
-	
+
 	// 如果指定了特定符号，只处理这些符号
 	var targetSymbols []*domain.SymbolInfo
 	if *symbols != "" {
@@ -1376,30 +1422,30 @@ func updateTimelineRanges(ctx context.Context, cfg *config.Config) error {
 		for _, symbol := range requestedSymbols {
 			symbolMap[strings.TrimSpace(strings.ToUpper(symbol))] = true
 		}
-		
+
 		for _, info := range symbolInfos {
 			if symbolMap[info.Symbol] {
 				targetSymbols = append(targetSymbols, info)
 			}
 		}
-		
+
 		if len(targetSymbols) == 0 {
 			return fmt.Errorf("未找到指定的交易对: %s", *symbols)
 		}
-		
+
 		fmt.Printf("🎯 只更新指定的 %d 个交易对\n\n", len(targetSymbols))
 	} else {
 		targetSymbols = symbolInfos
 	}
-	
+
 	// 更新每个交易对的时间范围
 	fmt.Println("📊 正在更新交易对时间范围...")
 	updatedCount := 0
 	errorCount := 0
-	
+
 	for i, oldInfo := range targetSymbols {
 		fmt.Printf("[%d/%d] 更新 %s...", i+1, len(targetSymbols), oldInfo.Symbol)
-		
+
 		// 获取最新的时间线信息
 		timeline, err := comps.downloader.GetSymbolTimeline(ctx, oldInfo.Symbol)
 		if err != nil {
@@ -1408,33 +1454,33 @@ func updateTimelineRanges(ctx context.Context, cfg *config.Config) error {
 			errorCount++
 			continue
 		}
-		
+
 		// 检查是否有更新
 		hasUpdates := false
 		newInfo := *oldInfo // 复制原有信息
-		
+
 		// 更新最新日期
 		if !timeline.LatestAvailableDate.Equal(oldInfo.LatestDate) {
 			hasUpdates = true
 			newInfo.LatestDate = timeline.LatestAvailableDate
 		}
-		
+
 		// 更新总月数
 		if int32(timeline.TotalMonths) != oldInfo.TotalMonths {
 			hasUpdates = true
 			newInfo.TotalMonths = int32(timeline.TotalMonths)
 		}
-		
+
 		// 更新最早日期（虽然通常不会变，但为了保险起见）
 		if !timeline.HistoricalStartDate.Equal(oldInfo.EarliestDate) {
 			hasUpdates = true
 			newInfo.EarliestDate = timeline.HistoricalStartDate
 		}
-		
+
 		if hasUpdates {
 			// 设置更新时间
 			newInfo.UpdatedAt = time.Now()
-			
+
 			// 保存到数据库
 			if err := comps.repository.UpdateSymbolInfo(ctx, &newInfo); err != nil {
 				fmt.Printf(" ❌ 数据库更新失败: %v\n", err)
@@ -1442,19 +1488,19 @@ func updateTimelineRanges(ctx context.Context, cfg *config.Config) error {
 				errorCount++
 				continue
 			}
-			
+
 			// 保存时间线到状态管理器
 			if err := comps.stateManager.SaveTimeline(timeline); err != nil {
 				log.Warn().Err(err).Str("symbol", oldInfo.Symbol).Msg("Failed to save timeline to state manager")
 			}
-			
-			fmt.Printf(" ✅ 已更新 (%d个月 -> %d个月)\n", 
+
+			fmt.Printf(" ✅ 已更新 (%d个月 -> %d个月)\n",
 				oldInfo.TotalMonths, timeline.TotalMonths)
 			updatedCount++
 		} else {
 			fmt.Printf(" ⏭️  无需更新 (%d个月)\n", timeline.TotalMonths)
 		}
-		
+
 		// 检查上下文是否被取消
 		select {
 		case <-ctx.Done():
@@ -1463,7 +1509,7 @@ func updateTimelineRanges(ctx context.Context, cfg *config.Config) error {
 		default:
 		}
 	}
-	
+
 	fmt.Println()
 	fmt.Println("🎉 时间范围更新完成！")
 	fmt.Printf("   ✅ 成功更新: %d 个交易对\n", updatedCount)
@@ -1472,34 +1518,34 @@ func updateTimelineRanges(ctx context.Context, cfg *config.Config) error {
 		fmt.Printf("   ❌ 更新失败: %d 个交易对\n", errorCount)
 	}
 	fmt.Println()
-	
+
 	log.Info().
 		Int("total", len(targetSymbols)).
 		Int("updated", updatedCount).
 		Int("errors", errorCount).
 		Msg("Timeline ranges update completed")
-		
+
 	return nil
 }
 
 // checkDataQuality 执行数据质量检查
 func checkDataQuality(ctx context.Context, cfg *config.Config) error {
 	log := logger.GetLogger("main")
-	
+
 	// 初始化组件
 	comps, err := initializeComponents(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to initialize components: %w", err)
 	}
 	defer comps.cleanup()
-	
+
 	// 解析命令行参数
 	symbols := []string{}
 	if len(flag.Args()) > 1 {
 		// 如果指定了交易对，使用指定的交易对
 		symbols = flag.Args()[1:]
 	}
-	
+
 	// 解析开始日期（支持YYYY-MM-DD或YYYY-MM格式）
 	var startDatePtr *time.Time
 	if *startDate != "" {
@@ -1509,7 +1555,7 @@ func checkDataQuality(ctx context.Context, cfg *config.Config) error {
 		}
 		startDatePtr = &parsed
 	}
-	
+
 	// 解析结束日期（支持YYYY-MM-DD或YYYY-MM格式）
 	var endDatePtr *time.Time
 	if *endDate != "" {
@@ -1519,14 +1565,14 @@ func checkDataQuality(ctx context.Context, cfg *config.Config) error {
 		}
 		endDatePtr = &parsed
 	}
-	
+
 	// 创建质量检查器
 	checker := quality.NewQualityChecker(comps.repository, comps.downloader)
 	reporter := quality.NewReporter()
-	
+
 	fmt.Println("🔍 开始数据质量检查...")
 	fmt.Println()
-	
+
 	// 如果没有指定交易对，获取所有交易对
 	if len(symbols) == 0 {
 		log.Info().Msg("No symbols specified, getting all available symbols")
@@ -1539,12 +1585,12 @@ func checkDataQuality(ctx context.Context, cfg *config.Config) error {
 	} else {
 		fmt.Printf("📊 将检查指定的 %d 个交易对: %s\n\n", len(symbols), strings.Join(symbols, ", "))
 	}
-	
+
 	if len(symbols) == 0 {
 		fmt.Println("⚠️  没有找到可检查的交易对")
 		return nil
 	}
-	
+
 	// 创建质量检查请求
 	request := &quality.QualityCheckRequest{
 		Symbols:   symbols,
@@ -1552,18 +1598,18 @@ func checkDataQuality(ctx context.Context, cfg *config.Config) error {
 		EndDate:   endDatePtr,
 		CheckMode: quality.CheckModeStandard,
 	}
-	
+
 	// 验证请求
 	if err := checker.ValidateRequest(request); err != nil {
 		return fmt.Errorf("invalid quality check request: %w", err)
 	}
-	
+
 	// 执行批量质量检查
 	batchReport, err := checker.CheckBatchQuality(ctx, request)
 	if err != nil {
 		return fmt.Errorf("failed to check batch quality: %w", err)
 	}
-	
+
 	// 根据输出格式生成报告
 	switch *format {
 	case "json":
@@ -1583,14 +1629,14 @@ func checkDataQuality(ctx context.Context, cfg *config.Config) error {
 		consoleReport := reporter.GenerateBatchConsoleReport(batchReport)
 		fmt.Print(consoleReport)
 	}
-	
+
 	log.Info().
 		Int("total_symbols", len(symbols)).
 		Int("checked_symbols", batchReport.CheckedSymbols).
 		Float64("average_score", batchReport.Summary.AverageScore).
 		Str("format", *format).
 		Msg("Data quality check completed")
-	
+
 	return nil
 }
 
@@ -1598,17 +1644,17 @@ func checkDataQuality(ctx context.Context, cfg *config.Config) error {
 func verifyData(ctx context.Context, cfg *config.Config) error {
 	log := logger.GetLogger("verify_data")
 	log.Info().Msg("Starting data verification")
-	
+
 	// 记录开始时间用于报告
 	verificationStartTime := time.Now()
-	
+
 	// 初始化组件
 	comps, err := initializeComponents(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to initialize components: %w", err)
 	}
 	defer comps.cleanup()
-	
+
 	// 解析交易对列表
 	var symbolList []string
 	if *symbols == "" {
@@ -1618,17 +1664,17 @@ func verifyData(ctx context.Context, cfg *config.Config) error {
 		if err != nil {
 			return fmt.Errorf("failed to get all symbols from database: %w", err)
 		}
-		
+
 		if len(symbolInfos) == 0 {
 			return fmt.Errorf("no symbols found in database, please run data import first")
 		}
-		
+
 		// 提取symbol名称
 		symbolList = make([]string, len(symbolInfos))
 		for i, info := range symbolInfos {
 			symbolList[i] = info.Symbol
 		}
-		
+
 		log.Info().Int("symbols_count", len(symbolList)).Msg("Found symbols in database for verification")
 	} else {
 		// 解析用户指定的交易对列表
@@ -1637,7 +1683,7 @@ func verifyData(ctx context.Context, cfg *config.Config) error {
 			return fmt.Errorf("no valid symbols provided")
 		}
 	}
-	
+
 	// 解析开始日期（支持YYYY-MM-DD或YYYY-MM格式）
 	var startDatePtr *time.Time
 	if *startDate != "" {
@@ -1647,7 +1693,7 @@ func verifyData(ctx context.Context, cfg *config.Config) error {
 		}
 		startDatePtr = &parsed
 	}
-	
+
 	// 解析结束日期（支持YYYY-MM-DD或YYYY-MM格式）
 	var endDatePtr *time.Time
 	if *endDate != "" {
@@ -1657,9 +1703,9 @@ func verifyData(ctx context.Context, cfg *config.Config) error {
 		}
 		endDatePtr = &parsed
 	}
-	
+
 	// 注意：不再设置默认时间范围，而是基于数据库实际数据范围
-	
+
 	fmt.Printf("🔍 开始验证数据质量...\n")
 	if *symbols == "" {
 		fmt.Printf("📊 交易对: 所有交易对 (共%d个)\n", len(symbolList))
@@ -1672,90 +1718,90 @@ func verifyData(ctx context.Context, cfg *config.Config) error {
 		fmt.Printf("📅 时间范围: 基于数据库实际数据范围\n")
 	}
 	fmt.Println()
-	
+
 	// 创建数据库验证检查器（新的基于数据库的验证逻辑）
 	databaseChecker := verification.NewDatabaseVerificationChecker(comps.repository)
-	
-    var batchReport *verification.BatchDatabaseVerificationReport
 
-    if *stream {
-        fmt.Println("⏱️ 启用流式输出：每个交易对完成后立即显示结果\n")
-        reporter := verification.NewDatabaseReporter()
+	var batchReport *verification.BatchDatabaseVerificationReport
 
-        // 逐个验证并即时输出
-        symbolReports := make([]*verification.DatabaseVerificationReport, 0, len(symbolList))
-        validReports := 0
-        var totalScore float64
+	if *stream {
+		fmt.Println("⏱️ 启用流式输出：每个交易对完成后立即显示结果")
+		reporter := verification.NewDatabaseReporter()
 
-        for idx, sym := range symbolList {
-            fmt.Printf("(%d/%d) 验证 %s ...\n", idx+1, len(symbolList), sym)
-            rep, rerr := databaseChecker.VerifySymbolData(ctx, sym, startDatePtr, endDatePtr)
-            if rerr != nil {
-                fmt.Printf("❌ %s 验证失败: %v\n\n", sym, rerr)
-                // 即使失败也附加一个空报告以占位
-                rep = &verification.DatabaseVerificationReport{
-                    Symbol:     sym,
-                    DataRange:  &verification.SymbolDataRange{Symbol: sym, HasData: false},
-                    GeneratedAt: time.Now(),
-                }
-            }
+		// 逐个验证并即时输出
+		symbolReports := make([]*verification.DatabaseVerificationReport, 0, len(symbolList))
+		validReports := 0
+		var totalScore float64
 
-            // 即时输出该交易对的报告
-            fmt.Print(reporter.GenerateSymbolConsoleReport(rep))
+		for idx, sym := range symbolList {
+			fmt.Printf("(%d/%d) 验证 %s ...\n", idx+1, len(symbolList), sym)
+			rep, rerr := databaseChecker.VerifySymbolData(ctx, sym, startDatePtr, endDatePtr)
+			if rerr != nil {
+				fmt.Printf("❌ %s 验证失败: %v\n\n", sym, rerr)
+				// 即使失败也附加一个空报告以占位
+				rep = &verification.DatabaseVerificationReport{
+					Symbol:      sym,
+					DataRange:   &verification.SymbolDataRange{Symbol: sym, HasData: false},
+					GeneratedAt: time.Now(),
+				}
+			}
 
-            // 汇总统计
-            if rep != nil {
-                symbolReports = append(symbolReports, rep)
-                if rep.DataRange != nil && rep.DataRange.HasData {
-                    validReports++
-                    totalScore += rep.QualityScore
-                }
-            }
-        }
+			// 即时输出该交易对的报告
+			fmt.Print(reporter.GenerateSymbolConsoleReport(rep))
 
-        avg := 0.0
-        if validReports > 0 {
-            avg = totalScore / float64(validReports)
-        }
+			// 汇总统计
+			if rep != nil {
+				symbolReports = append(symbolReports, rep)
+				if rep.DataRange != nil && rep.DataRange.HasData {
+					validReports++
+					totalScore += rep.QualityScore
+				}
+			}
+		}
 
-        batchReport = &verification.BatchDatabaseVerificationReport{
-            Reports:             symbolReports,
-            TotalSymbols:        len(symbolList),
-            VerifiedSymbols:     validReports,
-            AverageCompleteness: avg,
-            GeneratedAt:         time.Now(),
-        }
-    } else {
-        // 执行批量数据验证
-        batchReport, err = databaseChecker.VerifyBatchSymbols(ctx, symbolList, startDatePtr, endDatePtr)
-        if err != nil {
-            return fmt.Errorf("failed to verify data: %w", err)
-        }
-    }
-	
+		avg := 0.0
+		if validReports > 0 {
+			avg = totalScore / float64(validReports)
+		}
+
+		batchReport = &verification.BatchDatabaseVerificationReport{
+			Reports:             symbolReports,
+			TotalSymbols:        len(symbolList),
+			VerifiedSymbols:     validReports,
+			AverageCompleteness: avg,
+			GeneratedAt:         time.Now(),
+		}
+	} else {
+		// 执行批量数据验证
+		batchReport, err = databaseChecker.VerifyBatchSymbols(ctx, symbolList, startDatePtr, endDatePtr)
+		if err != nil {
+			return fmt.Errorf("failed to verify data: %w", err)
+		}
+	}
+
 	// 根据详细模式输出结果
-    if *detailed {
-        // 详细模式：输出JSON格式
-        reporter := verification.NewDatabaseReporter()
-        if err := reporter.WriteJSONReport(os.Stdout, batchReport); err != nil {
-            return fmt.Errorf("failed to write detailed report: %w", err)
-        }
-    } else {
-        reporter := verification.NewDatabaseReporter()
-        if *stream {
-            // 流式输出模式下已逐个输出，这里给出简要汇总表
-            fmt.Println("=== 验证汇总表 ===")
-            fmt.Print(reporter.GenerateSummaryTable(batchReport.Reports))
-        } else {
-            // 简洁模式：输出用户友好的摘要
-            consoleReport := reporter.GenerateBatchConsoleReport(batchReport)
-            fmt.Print(consoleReport)
-        }
+	if *detailed {
+		// 详细模式：输出JSON格式
+		reporter := verification.NewDatabaseReporter()
+		if err := reporter.WriteJSONReport(os.Stdout, batchReport); err != nil {
+			return fmt.Errorf("failed to write detailed report: %w", err)
+		}
+	} else {
+		reporter := verification.NewDatabaseReporter()
+		if *stream {
+			// 流式输出模式下已逐个输出，这里给出简要汇总表
+			fmt.Println("=== 验证汇总表 ===")
+			fmt.Print(reporter.GenerateSummaryTable(batchReport.Reports))
+		} else {
+			// 简洁模式：输出用户友好的摘要
+			consoleReport := reporter.GenerateBatchConsoleReport(batchReport)
+			fmt.Print(consoleReport)
+		}
 
-        // 添加验证结论
-        fmt.Println("\n📋 验证结论:")
-        if batchReport.AverageCompleteness >= 95.0 {
-            fmt.Println("✅ 数据完整性优秀，无需特别关注")
+		// 添加验证结论
+		fmt.Println("\n📋 验证结论:")
+		if batchReport.AverageCompleteness >= 95.0 {
+			fmt.Println("✅ 数据完整性优秀，无需特别关注")
 		} else if batchReport.AverageCompleteness >= 85.0 {
 			fmt.Println("⚠️  数据完整性良好，建议关注部分问题")
 		} else if batchReport.AverageCompleteness >= 70.0 {
@@ -1764,20 +1810,20 @@ func verifyData(ctx context.Context, cfg *config.Config) error {
 			fmt.Println("❌ 数据完整性较差，需要立即处理")
 		}
 	}
-	
+
 	log.Info().
 		Int("total_symbols", len(symbolList)).
 		Int("verified_symbols", batchReport.VerifiedSymbols).
 		Float64("average_score", batchReport.AverageCompleteness).
 		Bool("detailed", *detailed).
 		Msg("Data verification completed")
-	
+
 	// 生成详细报告文档
 	if err := generateVerificationReport(batchReport, verificationStartTime); err != nil {
 		log.Warn().Err(err).Msg("Failed to generate verification report, but verification completed successfully")
 		fmt.Printf("\n⚠️  报告生成失败: %v\n", err)
 	}
-	
+
 	return nil
 }
 
@@ -1786,30 +1832,30 @@ func generateVerificationReport(batchReport *verification.BatchDatabaseVerificat
 	// 创建报告生成器和适配器
 	reportGenerator := reports.NewReportGenerator()
 	adapter := reports.NewVerificationResultAdapter()
-	
+
 	// 转换验证结果为报告格式
 	resultsForReport := adapter.ConvertBatchReport(batchReport)
 	executionTime := adapter.ExtractExecutionTime(batchReport, startTime)
-	
+
 	// 生成报告文件路径
 	reportPath := reports.GenerateDefaultReportPath()
-	
+
 	// 生成报告
 	actualPath, err := reportGenerator.GenerateVerificationReport(resultsForReport, executionTime, reportPath)
 	if err != nil {
 		return fmt.Errorf("failed to generate verification report: %w", err)
 	}
-	
+
 	// 分析报告问题
 	criticalSymbols, attentionSymbols := adapter.AnalyzeReportIssues(batchReport)
-	
+
 	// 显示报告生成结果
 	fmt.Printf("\n📄 详细报告已生成: %s\n", actualPath)
-	
+
 	// 生成摘要信息
 	reportSummary := adapter.GenerateReportSummary(batchReport, executionTime)
 	fmt.Printf("📊 %s\n", reportSummary)
-	
+
 	// 显示关键问题提示
 	if len(criticalSymbols) > 0 {
 		fmt.Printf("\n🚨 严重问题交易对 (%d个): ", len(criticalSymbols))
@@ -1819,7 +1865,7 @@ func generateVerificationReport(batchReport *verification.BatchDatabaseVerificat
 			fmt.Printf("%s ... 等%d个\n", strings.Join(criticalSymbols[:5], ", "), len(criticalSymbols))
 		}
 	}
-	
+
 	if len(attentionSymbols) > 0 {
 		fmt.Printf("⚠️  需要关注交易对 (%d个): ", len(attentionSymbols))
 		if len(attentionSymbols) <= 5 {
@@ -1828,13 +1874,13 @@ func generateVerificationReport(batchReport *verification.BatchDatabaseVerificat
 			fmt.Printf("%s ... 等%d个\n", strings.Join(attentionSymbols[:5], ", "), len(attentionSymbols))
 		}
 	}
-	
+
 	if len(criticalSymbols) > 0 || len(attentionSymbols) > 0 {
 		fmt.Printf("\n🔍 查看详细报告了解具体问题和修复建议\n")
 	} else {
 		fmt.Printf("\n🎉 所有交易对数据质量良好！\n")
 	}
-	
+
 	return nil
 }
 
@@ -1843,7 +1889,7 @@ func parseSymbolsParameter(symbolsStr string) []string {
 	if symbolsStr == "" {
 		return nil
 	}
-	
+
 	// 按逗号分割并清理空白字符
 	parts := strings.Split(symbolsStr, ",")
 	var result []string
@@ -1863,7 +1909,7 @@ func parseFlexibleDate(dateStr string, isStartDate bool) (time.Time, error) {
 	if parsed, err := time.Parse("2006-01-02", dateStr); err == nil {
 		return parsed, nil
 	}
-	
+
 	// 然后尝试月份格式 YYYY-MM
 	if parsed, err := time.Parse("2006-01", dateStr); err == nil {
 		if isStartDate {
@@ -1876,7 +1922,7 @@ func parseFlexibleDate(dateStr string, isStartDate bool) (time.Time, error) {
 			return time.Date(lastDay.Year(), lastDay.Month(), lastDay.Day(), 23, 59, 59, 0, time.UTC), nil
 		}
 	}
-	
+
 	return time.Time{}, fmt.Errorf("invalid date format, expected YYYY-MM-DD or YYYY-MM")
 }
 
@@ -2053,7 +2099,7 @@ func backfillGaps(ctx context.Context, cfg *config.Config) error {
 
 	// 生成补全任务
 	backfillTasks := gapDetector.GenerateBackfillTasks(allGaps)
-	
+
 	fmt.Printf("🚀 开始补全 %d 个任务...\n\n", len(backfillTasks))
 
 	// 创建调度器并执行补全

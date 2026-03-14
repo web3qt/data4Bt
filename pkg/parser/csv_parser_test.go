@@ -33,16 +33,16 @@ func TestCSVParser_Parse(t *testing.T) {
 			expectValid:   true,
 		},
 		{
-			name: "Invalid price data",
-			csvData: `1609459200000,-29374.99,29375.00,29374.98,29375.00,0.05134800,1609459259999,1507.51637800,85,0.02540200,745.13980000,0`,
+			name:          "Invalid price data",
+			csvData:       `1609459200000,-29374.99,29375.00,29374.98,29375.00,0.05134800,1609459259999,1507.51637800,85,0.02540200,745.13980000,0`,
 			symbol:        "BTCUSDT",
 			expectedCount: 0,
 			expectError:   false,
 			expectValid:   false,
 		},
 		{
-			name: "Invalid record length",
-			csvData: `1609459200000,29374.99,29375.00`,
+			name:          "Invalid record length",
+			csvData:       `1609459200000,29374.99,29375.00`,
 			symbol:        "BTCUSDT",
 			expectedCount: 0,
 			expectError:   false,
@@ -84,9 +84,38 @@ func TestCSVParser_Parse(t *testing.T) {
 	}
 }
 
+func TestCSVParser_Parse1sData(t *testing.T) {
+	parser := NewCSVParser(config.ParserConfig{
+		ValidateData:    true,
+		SkipInvalidRows: false,
+		Interval:        "1s",
+	})
+
+	ctx := context.Background()
+	csvData := `1704067200000,42100.10,42100.20,42100.00,42100.15,1.20000000,1704067200999,50520.18000000,42,0.70000000,29470.10500000,0
+1704067201000,42100.15,42100.25,42100.10,42100.22,0.80000000,1704067201999,33680.17600000,35,0.50000000,21050.11000000,0`
+
+	klines, result, err := parser.Parse(ctx, []byte(csvData), "BTCUSDT")
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if len(klines) != 2 {
+		t.Fatalf("Expected 2 klines, got %d", len(klines))
+	}
+
+	if !result.Valid {
+		t.Fatalf("Expected validation result to be valid, got warnings=%v errors=%v", result.Warnings, result.Errors)
+	}
+
+	if klines[0].Interval != "1s" {
+		t.Fatalf("Expected interval 1s, got %s", klines[0].Interval)
+	}
+}
+
 func TestCSVParser_ValidateCSV(t *testing.T) {
 	parser := NewCSVParser(config.ParserConfig{})
-	
+
 	tests := []struct {
 		name        string
 		csvData     string
@@ -112,7 +141,7 @@ func TestCSVParser_ValidateCSV(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := parser.ValidateCSV([]byte(tt.csvData))
-			
+
 			if tt.expectError && err == nil {
 				t.Errorf("Expected error but got none")
 			}
@@ -125,7 +154,7 @@ func TestCSVParser_ValidateCSV(t *testing.T) {
 
 func TestCSVParser_parseTimestamp(t *testing.T) {
 	parser := NewCSVParser(config.ParserConfig{})
-	
+
 	tests := []struct {
 		name        string
 		timestamp   string
@@ -151,7 +180,7 @@ func TestCSVParser_parseTimestamp(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := parser.parseTimestamp(tt.timestamp)
-			
+
 			if tt.expectError && err == nil {
 				t.Errorf("Expected error but got none")
 			}
@@ -164,22 +193,22 @@ func TestCSVParser_parseTimestamp(t *testing.T) {
 
 func TestCSVParser_validateKLine(t *testing.T) {
 	parser := NewCSVParser(config.ParserConfig{ValidateData: true})
-	
+
 	validKline := &domain.KLine{
-		Symbol:               "BTCUSDT",
-		OpenTime:             time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
-		CloseTime:            time.Date(2024, 1, 1, 12, 0, 59, 999000000, time.UTC),
-		OpenPrice:            29374.99,
-		HighPrice:            29375.01,
-		LowPrice:             29374.98,
-		ClosePrice:           29375.00,
-		Volume:               0.05134800,
-		QuoteAssetVolume:     1507.51637800,
-		NumberOfTrades:       85,
-		TakerBuyBaseVolume:   0.02540200,
-		TakerBuyQuoteVolume:  745.13980000,
-		Interval:             "1m",
-		CreatedAt:            time.Now(),
+		Symbol:              "BTCUSDT",
+		OpenTime:            time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
+		CloseTime:           time.Date(2024, 1, 1, 12, 0, 59, 999000000, time.UTC),
+		OpenPrice:           29374.99,
+		HighPrice:           29375.01,
+		LowPrice:            29374.98,
+		ClosePrice:          29375.00,
+		Volume:              0.05134800,
+		QuoteAssetVolume:    1507.51637800,
+		NumberOfTrades:      85,
+		TakerBuyBaseVolume:  0.02540200,
+		TakerBuyQuoteVolume: 745.13980000,
+		Interval:            "1m",
+		CreatedAt:           time.Now(),
 	}
 
 	tests := []struct {
@@ -195,15 +224,15 @@ func TestCSVParser_validateKLine(t *testing.T) {
 		{
 			name: "Invalid high < low",
 			kline: &domain.KLine{
-				Symbol:      "BTCUSDT",
-				OpenTime:    time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
-				CloseTime:   time.Date(2024, 1, 1, 12, 0, 59, 999000000, time.UTC),
-				OpenPrice:   29374.99,
-				HighPrice:   29374.90, // Lower than low price
-				LowPrice:    29374.98,
-				ClosePrice:  29375.00,
-				Volume:      0.05134800,
-				Interval:    "1m",
+				Symbol:     "BTCUSDT",
+				OpenTime:   time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
+				CloseTime:  time.Date(2024, 1, 1, 12, 0, 59, 999000000, time.UTC),
+				OpenPrice:  29374.99,
+				HighPrice:  29374.90, // Lower than low price
+				LowPrice:   29374.98,
+				ClosePrice: 29375.00,
+				Volume:     0.05134800,
+				Interval:   "1m",
 			},
 			expectError: true,
 		},
@@ -227,7 +256,7 @@ func TestCSVParser_validateKLine(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := parser.validateKLine(tt.kline)
-			
+
 			if tt.expectError && err == nil {
 				t.Errorf("Expected error but got none")
 			}
@@ -235,5 +264,33 @@ func TestCSVParser_validateKLine(t *testing.T) {
 				t.Errorf("Unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestCSVParser_ValidateKLine1s(t *testing.T) {
+	parser := NewCSVParser(config.ParserConfig{
+		ValidateData: true,
+		Interval:     "1s",
+	})
+
+	kline := &domain.KLine{
+		Symbol:              "BTCUSDT",
+		OpenTime:            time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC),
+		CloseTime:           time.Date(2024, 1, 1, 12, 0, 0, 999000000, time.UTC),
+		OpenPrice:           29374.99,
+		HighPrice:           29375.01,
+		LowPrice:            29374.98,
+		ClosePrice:          29375.00,
+		Volume:              0.05134800,
+		QuoteAssetVolume:    1507.51637800,
+		NumberOfTrades:      85,
+		TakerBuyBaseVolume:  0.02540200,
+		TakerBuyQuoteVolume: 745.13980000,
+		Interval:            "1s",
+		CreatedAt:           time.Now(),
+	}
+
+	if err := parser.validateKLine(kline); err != nil {
+		t.Fatalf("Expected 1s kline to validate, got %v", err)
 	}
 }
