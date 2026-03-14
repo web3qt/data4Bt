@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+source "$SCRIPT_DIR/scripts/futures_um_history_lib.sh"
+
+MODE="${1:---bg}" # --bg | --fg | --reset-bg | --reset-fg
+if [[ "$MODE" != "--bg" && "$MODE" != "--fg" && "$MODE" != "--reset-bg" && "$MODE" != "--reset-fg" ]]; then
+  echo "Usage: $0 [--bg|--fg|--reset-bg|--reset-fg]"
+  exit 1
+fi
+
+RESET="false"
+RUN_MODE="$MODE"
+if [[ "$MODE" == "--reset-bg" ]]; then
+  RESET="true"
+  RUN_MODE="--bg"
+elif [[ "$MODE" == "--reset-fg" ]]; then
+  RESET="true"
+  RUN_MODE="--fg"
+fi
+
+CONFIG_FILE="configs/config-futures-um-2024-2025.yml"
+STATE_DIR="state/futures_um_2024_2025"
+STATE_FILE="$STATE_DIR/progress.json"
+TIMELINE_FILE="$STATE_DIR/timelines.json"
+SYMBOLS_FILE="$STATE_DIR/symbols.txt"
+DISCOVERY_FILE="$STATE_DIR/discovery.json"
+PID_FILE=".futures_um_2024_2025_pid"
+STDOUT_LOG="logs/futures_um_2024_2025.out"
+BINARY="./data4bt"
+S3_BUCKET_URL="https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
+ROOT_PREFIX="data/futures/um/monthly/klines/"
+WINDOW_START_MONTH="2024-03"
+WINDOW_END_MONTH="2025-02"
+LAST_DATE="2024-02-01T00:00:00Z"
+NOW_UTC="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+mkdir -p "$STATE_DIR" logs
+
+for cmd in curl jq go perl; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "Missing dependency: $cmd"
+    exit 1
+  fi
+done
+
+if [[ ! -x "$BINARY" ]] || ! "$BINARY" -version >/dev/null 2>&1; then
+  echo "[0/4] Building binary ($BINARY)..."
+  CGO_ENABLED=0 go build -o "$BINARY" cmd/main.go
+fi
+
+fetch_s3_listing_xml() {
+  local prefix="$1"
+  local delimiter="${2:-}"
+  local query
+  query="prefix=$(encode_uri_component "$prefix")"
+  if [[ -n "$delimiter" ]]; then
+    query="${query}&delimiter=$(encode_uri_component "$delimiter")"
+  fi
+
+  env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy \
+    curl -fsSL --max-time 60 "${S3_BUCKET_URL}?${query}"
+}
+
+write_discovery_status() {
+  local phase="$1"
+  local total_candidates="${2:-0}"
+  local scanned_count="${3:-0}"
+  local matched_count="${4:-0}"
+  local current_symbol="${5:-}"
+
+  jq -n \
+    --arg phase "$phase" \
+    --argjson total_candidates "$total_candidates" \
+    --argjson scanned_count "$scanned_count" \
+    --argjson matched_count "$matched_count" \
+    --arg current_symbol "$current_symbol" \
+    --arg last_updated "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    '{
+      phase: $phase,
+      total_candidates: $total_candidates,
+      scanned_count: $scanned_count,
+      matched_count: $matched_count,
+      current_symbol: $current_symbol,
+      last_updated: $last_updated
+    }' > "$DISCOVERY_FILE"
+}
+
+discover_window_symbols() {
+  local candidate_file meta_file root_xml total_candidates matched_count scanned_count
+  candidate_file="$(mktemp)"
+  meta_file="$(mktemp)"
+  trap 'rm -f "$candidate_file" "$meta_file"' RETURN
+
+  echo "[2/4] Discovering all historical futures UM USDT symbols in ${WINDOW_START_MONTH}..${WINDOW_END_MONTH}..."
+  root_xml="$(fetch_s3_listing_xml "$ROOT_PREFIX" "/")"
+  printf '%s' "$root_xml" \
+    | extract_futures_um_symbols_from_s3_xml \
+    | grep 'USDT$' \
+    | sort -u > "$candidate_file"
+
+  total_candidates="$(wc -l < "$candidate_file" | tr -d ' ')"
+  if [[ "$total_candidates" -eq 0 ]]; then
+    echo "No historical USDT futures symbols discovered from S3 listing."
+    exit 1
+  fi
+  echo "Historical candidate symbols: $total_candidates"
+  write_discovery_status "discovering" "$total_candidates" 0 0 ""
+
+  matched_count=0
+  scanned_count=0
+  while IFS= read -r symbol; do
+    local symbol_xml window_months month_count first_month last_month months_csv
+    scanned_count=$((scanned_count + 1))
+    write_discovery_status "discovering" "$total_candidates" "$scanned_count" "$matched_count" "$symbol"
+
+    if ! symbol_xml="$(fetch_s3_listing_xml "${ROOT_PREFIX}${symbol}/1m/")"; then
+      echo "WARN: failed to fetch listing for $symbol" >&2
+      continue
+    fi
+
+    window_months="$(
+      printf '%s' "$symbol_xml" \
+        | extract_kline_months_from_s3_xml \
+        | filter_months_in_window "$WINDOW_START_MONTH" "$WINDOW_END_MONTH" \
+        || true
+    )"
+
+    if [[ -z "${window_months//$'\n'/}" ]]; then
+      if (( scanned_count % 50 == 0 )); then
+        echo "  scanned $scanned_count/$total_candidates, matched $matched_count"
+      fi
+      continue
+    fi
+
+    month_count="$(printf '%s\n' "$window_months" | sed '/^$/d' | wc -l | tr -d ' ')"
+    first_month="$(printf '%s\n' "$window_months" | head -n 1)"
+    last_month="$(printf '%s\n' "$window_months" | tail -n 1)"
+    months_csv="$(printf '%s\n' "$window_months" | paste -sd, -)"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$symbol" "$month_count" "$first_month" "$last_month" "$months_csv" >> "$meta_file"
+
+    matched_count=$((matched_count + 1))
+    write_discovery_status "discovering" "$total_candidates" "$scanned_count" "$matched_count" "$symbol"
+    if (( scanned_count % 50 == 0 )); then
+      echo "  scanned $scanned_count/$total_candidates, matched $matched_count"
+    fi
+  done < "$candidate_file"
+
+  sort -u "$meta_file" -o "$meta_file"
+  cut -f1 "$meta_file" > "$SYMBOLS_FILE"
+
+  jq -Rn --arg now "$NOW_UTC" '
+    reduce inputs as $line ({};
+      ($line | split("\t")) as $f |
+      .[$f[0]] = {
+        symbol: $f[0],
+        historical_start_date: ($f[2] + "-01T00:00:00Z"),
+        current_import_date: "0001-01-01T00:00:00Z",
+        latest_available_date: ($f[3] + "-01T00:00:00Z"),
+        total_months: ($f[1] | tonumber),
+        imported_months_count: 0,
+        failed_months_count: 0,
+        import_progress: 0,
+        status: "discovered",
+        last_updated: $now,
+        available_months: (if ($f[4] | length) == 0 then [] else ($f[4] | split(",")) end),
+        imported_months_list: [],
+        failed_months_list: []
+      }
+    )
+  ' < "$meta_file" > "$TIMELINE_FILE"
+
+  jq -Rn --arg last "$LAST_DATE" --arg now "$NOW_UTC" '
+    reduce inputs as $s ({};
+      if ($s | length) == 0 then
+        .
+      else
+        .[$s] = {
+          symbol: $s,
+          last_date: $last,
+          total_files: 0,
+          processed: 0,
+          failed: 0,
+          last_updated: $now,
+          status: "pending",
+          worker_id: -1,
+          current_month: "",
+          error_message: "",
+          progress_percent: 0
+        }
+      end
+    )
+  ' < "$SYMBOLS_FILE" > "$STATE_FILE"
+
+  echo "Window symbols discovered: $(wc -l < "$SYMBOLS_FILE" | tr -d ' ')"
+  write_discovery_status "discovered" "$total_candidates" "$scanned_count" "$matched_count" ""
+}
+
+echo "[1/4] Ensuring destination DB/tables..."
+"$BINARY" -cmd=init-db -config="$CONFIG_FILE" >/dev/null
+
+if [[ "$RESET" == "true" || ! -f "$STATE_FILE" || ! -f "$TIMELINE_FILE" || ! -f "$SYMBOLS_FILE" ]]; then
+  discover_window_symbols
+else
+  echo "[2/4] Reusing existing discovery artifacts in $STATE_DIR"
+  write_discovery_status "discovered" "$(wc -l < "$SYMBOLS_FILE" | tr -d ' ')" "$(wc -l < "$SYMBOLS_FILE" | tr -d ' ')" "$(wc -l < "$SYMBOLS_FILE" | tr -d ' ')" ""
+fi
+
+echo "[3/4] Discovery artifacts ready:"
+echo "  Symbols:   $(wc -l < "$SYMBOLS_FILE" | tr -d ' ')"
+echo "  State:     $STATE_FILE"
+echo "  Timelines: $TIMELINE_FILE"
+
+echo "[4/4] Starting historical futures run with $CONFIG_FILE"
+SYMBOL_ARG="$(paste -sd, "$SYMBOLS_FILE")"
+
+if [[ "$RUN_MODE" == "--fg" ]]; then
+  write_discovery_status "running" "$(wc -l < "$SYMBOLS_FILE" | tr -d ' ')" "$(wc -l < "$SYMBOLS_FILE" | tr -d ' ')" "$(wc -l < "$SYMBOLS_FILE" | tr -d ' ')" ""
+  exec "$BINARY" -cmd=run -config="$CONFIG_FILE" -symbols="$SYMBOL_ARG"
+else
+  write_discovery_status "running" "$(wc -l < "$SYMBOLS_FILE" | tr -d ' ')" "$(wc -l < "$SYMBOLS_FILE" | tr -d ' ')" "$(wc -l < "$SYMBOLS_FILE" | tr -d ' ')" ""
+  nohup "$BINARY" -cmd=run -config="$CONFIG_FILE" -symbols="$SYMBOL_ARG" > "$STDOUT_LOG" 2>&1 &
+  PID="$!"
+  echo "$PID" > "$PID_FILE"
+  echo "Started in background. PID=$PID"
+  echo "Logs: $STDOUT_LOG"
+  echo "Watch: ./watch-futures-um-2024-2025"
+fi

@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+STATE_DIR="${STATE_DIR:-$SCRIPT_DIR/state/futures_um_1s_coingecko_top30_30d}"
+STATE_FILE="$STATE_DIR/progress.json"
+SYMBOL_PROGRESS_FILE="$STATE_DIR/symbol_progress.json"
+LOG_FILE="${LOG_FILE:-$SCRIPT_DIR/logs/futures_um_1s_coingecko_top30_30d.log}"
+SCREEN_NAME="${SCREEN_NAME:-futures_um_1s_coingecko_top30_30d}"
+TOTAL_SYMBOLS="${TOTAL_SYMBOLS:-30}"
+CLICKHOUSE_CONTAINER="${CLICKHOUSE_CONTAINER:-data4bt-clickhouse}"
+CLICKHOUSE_USER="${CLICKHOUSE_USER:-default}"
+CLICKHOUSE_PASSWORD="${CLICKHOUSE_PASSWORD:-123456}"
+DB_NAME="${DB_NAME:-data4BT_futures_um_1s}"
+TABLE_NAME="${TABLE_NAME:-klines_1s}"
+
+INTERVAL=30
+ONCE=false
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./watch-futures-um-1s-coingecko-top30-30d          # refresh every 30s
+  ./watch-futures-um-1s-coingecko-top30-30d 10       # refresh every 10s
+  ./watch-futures-um-1s-coingecko-top30-30d --once   # print once and exit
+EOF
+}
+
+if [[ $# -gt 1 ]]; then
+  usage
+  exit 1
+fi
+
+if [[ $# -eq 1 ]]; then
+  case "$1" in
+    --once)
+      ONCE=true
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      if [[ "$1" =~ ^[0-9]+$ ]] && [[ "$1" -gt 0 ]]; then
+        INTERVAL="$1"
+      else
+        echo "Invalid argument: $1"
+        usage
+        exit 1
+      fi
+      ;;
+  esac
+fi
+
+run_screen_ls() {
+  if [[ -n "${SCREEN_LS_HELPER:-}" ]]; then
+    "$SCREEN_LS_HELPER"
+  else
+    screen -ls
+  fi
+}
+
+run_clickhouse_query() {
+  local query="$1"
+
+  if [[ -n "${CLICKHOUSE_QUERY_HELPER:-}" ]]; then
+    "$CLICKHOUSE_QUERY_HELPER" "$query"
+  else
+    docker exec "$CLICKHOUSE_CONTAINER" clickhouse-client \
+      --user="$CLICKHOUSE_USER" \
+      --password="$CLICKHOUSE_PASSWORD" \
+      --query "$query"
+  fi
+}
+
+build_tracked_symbols_clause() {
+  python3 - "$STATE_FILE" "$SYMBOL_PROGRESS_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+state_file = Path(sys.argv[1])
+symbol_progress_file = Path(sys.argv[2])
+symbols = []
+
+if state_file.exists():
+    data = json.loads(state_file.read_text())
+    symbols = sorted(data.keys())
+elif symbol_progress_file.exists():
+    data = json.loads(symbol_progress_file.read_text())
+    symbols = sorted(data.keys())
+
+if symbols:
+    print(",".join("'" + symbol.replace("'", "''") + "'" for symbol in symbols))
+PY
+}
+
+print_runner_status() {
+  local screen_output
+  screen_output="$(run_screen_ls 2>/dev/null || true)"
+
+  if [[ "$screen_output" == *"$SCREEN_NAME"* ]]; then
+    echo "Runner: RUNNING (screen: $SCREEN_NAME)"
+  else
+    echo "Runner: NOT RUNNING (screen: $SCREEN_NAME)"
+  fi
+}
+
+print_db_summary() {
+  local symbols_clause
+  local query
+  local result
+  local rows symbol_count min_open max_open
+
+  symbols_clause="$(build_tracked_symbols_clause)"
+  if [[ -z "$symbols_clause" ]]; then
+    echo "DB rows: N/A"
+    echo "DB symbols with data: N/A/$TOTAL_SYMBOLS"
+    echo "DB time range: N/A"
+    return
+  fi
+
+  query="SELECT count(), uniqExact(symbol), min(open_time), max(open_time) FROM ${DB_NAME}.${TABLE_NAME} WHERE symbol IN (${symbols_clause})"
+
+  if ! result="$(run_clickhouse_query "$query" 2>/dev/null)"; then
+    echo "DB rows: N/A"
+    echo "DB symbols with data: N/A/$TOTAL_SYMBOLS"
+    echo "DB time range: N/A"
+    return
+  fi
+
+  IFS=$'\t' read -r rows symbol_count min_open max_open <<<"$result"
+
+  echo "DB rows: ${rows:-N/A}"
+  echo "DB symbols with data: ${symbol_count:-N/A}/$TOTAL_SYMBOLS"
+  echo "DB time range: ${min_open:-N/A} -> ${max_open:-N/A}"
+}
+
+print_state_summary() {
+  python3 - "$STATE_FILE" "$SYMBOL_PROGRESS_FILE" "$TOTAL_SYMBOLS" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+state_file = Path(sys.argv[1])
+symbol_progress_file = Path(sys.argv[2])
+total_symbols = sys.argv[3]
+
+tracked = 0
+if state_file.exists():
+    tracked = len(json.loads(state_file.read_text()))
+
+if not symbol_progress_file.exists():
+    print(f"State tracked: {tracked}/{total_symbols}")
+    print(f"State completed: 0/{total_symbols}")
+    print("State running: 0")
+    print("State failed: 0")
+    print("Latest state update: N/A")
+    print("")
+    print("Running now:")
+    print("  (none)")
+    sys.exit(0)
+
+data = json.loads(symbol_progress_file.read_text())
+completed = sum(1 for item in data.values() if item.get("status") == "completed")
+running = sum(1 for item in data.values() if item.get("status") == "running")
+failed = sum(1 for item in data.values() if item.get("status") == "failed")
+latest_update = max((item.get("last_update", "") for item in data.values()), default="")
+
+if tracked == 0:
+    tracked = len(data)
+
+print(f"State tracked: {tracked}/{total_symbols}")
+print(f"State completed: {completed}/{total_symbols}")
+print(f"State running: {running}")
+print(f"State failed: {failed}")
+print(f"Latest state update: {latest_update or 'N/A'}")
+print("")
+print("Running now:")
+
+running_items = [
+    item for item in data.values()
+    if item.get("status") == "running"
+]
+
+if not running_items:
+    print("  (none)")
+    sys.exit(0)
+
+running_items.sort(key=lambda item: (item.get("worker_id", 9999), item.get("symbol", "")))
+for item in running_items[:10]:
+    progress = float(item.get("progress", 0) or 0)
+    worker_id = item.get("worker_id", "?")
+    symbol = item.get("symbol", "")
+    current_month = item.get("current_month", "")
+    if current_month:
+        print(f"  worker={worker_id} symbol={symbol} progress={progress:.2f}% current_month={current_month}")
+    else:
+        print(f"  worker={worker_id} symbol={symbol} progress={progress:.2f}%")
+PY
+}
+
+print_recent_logs() {
+  echo ""
+  echo "Recent log lines:"
+
+  if [[ -f "$LOG_FILE" ]]; then
+    tail -n 5 "$LOG_FILE"
+  else
+    echo "Log file missing: $LOG_FILE"
+  fi
+}
+
+print_screen() {
+  if [[ -t 1 ]]; then
+    clear 2>/dev/null || true
+  fi
+
+  echo "=== Data4BT Futures-UM 1s CoinGecko Top30/30D Monitor  $(date '+%F %T') ==="
+  print_runner_status
+  print_db_summary
+  echo
+  print_state_summary
+  print_recent_logs
+
+  if [[ "$ONCE" == "false" ]]; then
+    echo
+    echo "Refresh every ${INTERVAL}s. Ctrl+C to exit."
+  fi
+}
+
+while true; do
+  print_screen
+  if [[ "$ONCE" == "true" ]]; then
+    exit 0
+  fi
+  sleep "$INTERVAL"
+done

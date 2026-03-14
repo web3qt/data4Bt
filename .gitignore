@@ -20,10 +20,6 @@ state/
 .*_pid
 data4bt
 backfill_futures_daily
-run-futures-um-1s-*
-run-futures-um-2024-2025
-watch-futures-um-1s-*
-watch-futures-um-2024-2025
 
 # Editor directories and files
 .idea

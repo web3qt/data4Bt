@@ -1,0 +1,90 @@
+# USDT-M futures 1s top30 recent-30d import configuration
+
+log:
+  level: "info"
+  format: "json"
+  output: "file"
+  file_path: "logs/futures_um_1s_top30_30d.log"
+
+binance:
+  base_url: "https://data.binance.vision"
+  data_path: "/data/futures/um/daily/aggTrades"
+  market_type: "futures_um"
+  exchange_info_url: ""
+  symbols_filter: "USDT"
+  interval: "1s"
+  timeout: 120s
+  retry_count: 5
+  retry_delay: 5s
+  proxy_url: ""
+
+downloader:
+  concurrency: 16
+  buffer_size: 200
+  user_agent: "BinanceDataLoader/1.0"
+  enable_compression: true
+  max_file_size: "1GB"
+
+parser:
+  concurrency: 8
+  buffer_size: 100
+  validate_data: true
+  skip_invalid_rows: true
+  interval: "1s"
+
+database:
+  clickhouse:
+    hosts:
+      - "localhost:9000"
+    database: "data4BT_futures_um_1s"
+    base_table: "klines_1s"
+    username: "default"
+    password: "123456"
+    settings:
+      max_execution_time: 7200
+      max_memory_usage: 8000000000
+      max_threads: 16
+    compression: "lz4"
+    dial_timeout: 60s
+    max_open_conns: 20
+    max_idle_conns: 10
+    conn_max_lifetime: 30m
+
+importer:
+  batch_size: 50000
+  buffer_size: 200000
+  flush_interval: 30s
+  enable_deduplication: true
+
+state:
+  storage_type: "file"
+  file_path: "state/futures_um_1s_top30_30d/progress.json"
+  backup_count: 5
+  save_interval: 30s
+
+materialized_views:
+  enabled: false
+  intervals: []
+  refresh_interval: 5m
+  parallel_refresh: false
+
+monitoring:
+  enabled: false
+  metrics_port: 8897
+  health_check_port: 8898
+  progress_report_interval: 60s
+  web_dashboard:
+    enabled: false
+    port: 8899
+    auto_start: false
+    refresh_interval: 30s
+    show_worker_status: true
+    show_realtime_progress: true
+
+scheduler:
+  end_date: ""
+  batch_days: 30
+  max_concurrent_symbols: 5
+  timeline_cache_duration: 24h
+  auto_discover_symbols: false
+  show_startup_overview: false

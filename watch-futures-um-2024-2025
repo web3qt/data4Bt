@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PID_FILE="$SCRIPT_DIR/.futures_um_2024_2025_pid"
+STATE_FILE="$SCRIPT_DIR/state/futures_um_2024_2025/progress.json"
+TIMELINE_FILE="$SCRIPT_DIR/state/futures_um_2024_2025/timelines.json"
+DISCOVERY_FILE="$SCRIPT_DIR/state/futures_um_2024_2025/discovery.json"
+PROC_PATTERN='^[[:space:]]*[0-9]+[[:space:]]+(\./)?data4bt[[:space:]]+-cmd=run[[:space:]]+-config=configs/config-futures-um-2024-2025\.yml([[:space:]]+-symbols=.*)?$'
+RUNNER_PATTERN='^[[:space:]]*[0-9]+[[:space:]]+bash[[:space:]]+\./run-futures-um-2024-2025[[:space:]]+--(bg|reset-bg)$'
+
+INTERVAL=30
+ONCE=false
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./watch-futures-um-2024-2025          # refresh every 30s
+  ./watch-futures-um-2024-2025 10       # refresh every 10s
+  ./watch-futures-um-2024-2025 --once   # print once and exit
+EOF
+}
+
+if [[ $# -gt 1 ]]; then
+  usage
+  exit 1
+fi
+
+if [[ $# -eq 1 ]]; then
+  case "$1" in
+    --once)
+      ONCE=true
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      if [[ "$1" =~ ^[0-9]+$ ]] && [[ "$1" -gt 0 ]]; then
+        INTERVAL="$1"
+      else
+        echo "Invalid argument: $1"
+        usage
+        exit 1
+      fi
+      ;;
+  esac
+fi
+
+print_screen() {
+  if [[ -t 1 ]]; then
+    clear 2>/dev/null || true
+  fi
+
+  echo "=== Data4BT Futures-UM 2024-03~2025-02 Monitor  $(date '+%F %T') ==="
+
+  local found_pid runner_pid
+  found_pid="$(
+    ps -axo pid,command \
+      | grep -E "$PROC_PATTERN" \
+      | grep -v grep \
+      | awk 'NR==1{print $1}' \
+      || true
+  )"
+  runner_pid="$(
+    ps -axo pid,command \
+      | grep -E "$RUNNER_PATTERN" \
+      | grep -v grep \
+      | awk 'NR==1{print $1}' \
+      || true
+  )"
+
+  if [[ -n "${found_pid:-}" ]] && ps -p "$found_pid" >/dev/null 2>&1; then
+    echo "$found_pid" > "$PID_FILE"
+    echo "Process: RUNNING"
+    ps -p "$found_pid" -o pid=,ppid=,etime=,%cpu=,%mem=,command=
+  elif [[ -n "${runner_pid:-}" ]] && ps -p "$runner_pid" >/dev/null 2>&1; then
+    echo "Process: DISCOVERING"
+    ps -p "$runner_pid" -o pid=,ppid=,etime=,%cpu=,%mem=,command=
+  else
+    if [[ -f "$PID_FILE" ]]; then
+      echo "Process: NOT RUNNING (last pid=$(cat "$PID_FILE" 2>/dev/null || echo unknown))"
+    else
+      echo "Process: NOT RUNNING"
+    fi
+  fi
+
+  local rows_window rows_total
+  rows_window="$(
+    curl -sS -u default:123456 -X POST 'http://localhost:8123/' \
+      --data "SELECT count() FROM data4BT_futures_um.klines_1m WHERE open_time >= toDateTime64('2024-03-01 00:00:00', 3) AND open_time < toDateTime64('2025-03-01 00:00:00', 3)" \
+      2>/dev/null || echo 'N/A'
+  )"
+  rows_total="$(
+    curl -sS -u default:123456 -X POST 'http://localhost:8123/' \
+      --data "SELECT count() FROM data4BT_futures_um.klines_1m" \
+      2>/dev/null || echo 'N/A'
+  )"
+  echo "Rows(window 2024-03~2025-02): $rows_window"
+  echo "Rows(total klines_1m): $rows_total"
+  echo
+
+  if [[ -f "$DISCOVERY_FILE" ]]; then
+    jq -r '
+      "Discovery: \(.phase // "unknown")",
+      "Discovery progress: \(.scanned_count // 0)/\(.total_candidates // 0)",
+      "Window matches: \(.matched_count // 0)",
+      "Current symbol: \((.current_symbol // "") | if length == 0 then "-" else . end)",
+      "Discovery updated: \(.last_updated // "")",
+      ""
+    ' "$DISCOVERY_FILE"
+  fi
+
+  if [[ -f "$STATE_FILE" && -f "$TIMELINE_FILE" ]]; then
+    jq -n --slurpfile state "$STATE_FILE" --slurpfile timelines "$TIMELINE_FILE" '
+      ($state[0] // {}) as $s |
+      ($timelines[0] // {}) as $t |
+      ($t | to_entries | map({
+        symbol: .key,
+        expected: (.value.total_months // 0),
+        first_month: ((.value.historical_start_date // "")[0:7]),
+        last_month: ((.value.latest_available_date // "")[0:7]),
+        processed: ($s[.key].processed // 0),
+        last_date: ($s[.key].last_date // "")
+      })) as $rows |
+      "Symbols: \($rows|length)",
+      "Expected months(window): \($rows|map(.expected)|add // 0)",
+      "Done: \($rows|map(select(.expected > 0 and .processed >= .expected))|length)",
+      "In progress: \($rows|map(select(.processed > 0 and .processed < .expected))|length)",
+      "Not started: \($rows|map(select(.processed == 0))|length)",
+      "Total processed months: \($rows|map(.processed)|add // 0)",
+      "Latest state update: \((($s | to_entries | map(.value.last_updated // "")) | max) // "")",
+      "",
+      "Top progress:",
+      (
+        $rows
+        | sort_by((if .expected == 0 then 0 else (.processed / .expected) end), .processed)
+        | reverse | .[0:10]
+        | .[]
+        | "  \(.symbol)\tprocessed=\(.processed)/\(.expected)\twindow=\(.first_month)..\(.last_month)\tlast_date=\(.last_date)"
+      )
+    ' "$STATE_FILE"
+  else
+    echo "Missing state or timeline file:"
+    echo "  $STATE_FILE"
+    echo "  $TIMELINE_FILE"
+  fi
+
+  if [[ "$ONCE" == "false" ]]; then
+    echo
+    echo "Refresh every ${INTERVAL}s. Ctrl+C to exit."
+  fi
+}
+
+while true; do
+  print_screen
+  if [[ "$ONCE" == "true" ]]; then
+    exit 0
+  fi
+  sleep "$INTERVAL"
+done

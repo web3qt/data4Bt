@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+MODE="${1:---bg}" # --bg | --fg
+if [[ "$MODE" != "--bg" && "$MODE" != "--fg" ]]; then
+  echo "Usage: $0 [--bg|--fg]"
+  exit 1
+fi
+
+CONFIG_FILE="configs/config-futures-um-1s-top30-30d.yml"
+STATE_DIR="state/futures_um_1s_top30_30d"
+SCREEN_NAME="futures_um_1s_top30_30d"
+STDOUT_LOG="logs/futures_um_1s_top30_30d.out"
+BINARY="./data4bt"
+
+mkdir -p "$STATE_DIR" logs
+
+for cmd in go screen; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "Missing dependency: $cmd"
+    exit 1
+  fi
+done
+
+echo "[0/2] Building binary ($BINARY)..."
+env CGO_ENABLED=0 GOCACHE="${GOCACHE:-/tmp/go-build}" go build -o "$BINARY" cmd/main.go
+
+echo "[1/2] Ensuring destination DB/tables..."
+"$BINARY" -cmd=init-db -config="$CONFIG_FILE" >/dev/null
+
+echo "[2/2] Starting futures UM 1s top30 recent-30d import with $CONFIG_FILE"
+if [[ "$MODE" == "--fg" ]]; then
+  exec "$BINARY" -cmd=futures-um-1s-top30-30d -config="$CONFIG_FILE"
+fi
+
+if screen -ls 2>/dev/null | grep -q "[.]${SCREEN_NAME}[[:space:]]"; then
+  echo "Screen session already exists: $SCREEN_NAME"
+  exit 1
+fi
+
+screen -dmS "$SCREEN_NAME" bash -lc "cd '$SCRIPT_DIR' && exec '$BINARY' -cmd=futures-um-1s-top30-30d -config='$CONFIG_FILE' >> '$STDOUT_LOG' 2>&1"
+echo "Started in background via screen. Session=$SCREEN_NAME"
+echo "Logs: $STDOUT_LOG"

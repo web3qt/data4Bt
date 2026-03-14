@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+MODE="${1:---bg}" # --bg | --fg
+if [[ "$MODE" != "--bg" && "$MODE" != "--fg" ]]; then
+  echo "Usage: $0 [--bg|--fg]"
+  exit 1
+fi
+
+CONFIG_FILE="configs/config-futures-um-1s-15d.yml"
+STATE_DIR="state/futures_um_1s_15d"
+PID_FILE=".futures_um_1s_15d_pid"
+STDOUT_LOG="logs/futures_um_1s_15d.out"
+BINARY="./data4bt"
+
+mkdir -p "$STATE_DIR" logs
+
+for cmd in go; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "Missing dependency: $cmd"
+    exit 1
+  fi
+done
+
+echo "[0/2] Building binary ($BINARY)..."
+env CGO_ENABLED=0 GOCACHE="${GOCACHE:-/tmp/go-build}" go build -o "$BINARY" cmd/main.go
+
+echo "[1/2] Ensuring destination DB/tables..."
+"$BINARY" -cmd=init-db -config="$CONFIG_FILE" >/dev/null
+
+echo "[2/2] Starting futures UM 1s latest-15d import with $CONFIG_FILE"
+if [[ "$MODE" == "--fg" ]]; then
+  exec "$BINARY" -cmd=futures-um-1s-15d -config="$CONFIG_FILE"
+else
+  nohup "$BINARY" -cmd=futures-um-1s-15d -config="$CONFIG_FILE" > "$STDOUT_LOG" 2>&1 &
+  PID="$!"
+  echo "$PID" > "$PID_FILE"
+  echo "Started in background. PID=$PID"
+  echo "Logs: $STDOUT_LOG"
+fi
